@@ -9,6 +9,7 @@ const {
   getSchemeHandler,
   updateSchemeStatusHandler,
 } = require("../controllers/scheme.controller");
+const { schemePayoutsHandler } = require("../controllers/payout.controller");
 
 const router = express.Router();
 
@@ -16,6 +17,7 @@ router.use(authMiddleware);
 router.use(adminOrStaffMiddleware);
 
 router.post("/", staffPermissionMiddleware("canCreateCustomer"), createSchemeHandler);
+router.get("/:schemeId/payouts", schemePayoutsHandler);
 router.get("/:schemeId", getSchemeHandler);
 router.patch("/:schemeId/status", updateSchemeStatusHandler);
 

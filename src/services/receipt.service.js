@@ -40,10 +40,17 @@ const generatePassbookNumber = async () => {
   return String(seq).padStart(4, "0");
 };
 
+const generatePayoutNumber = async (date = new Date()) => {
+  const year = date.getFullYear();
+  const seq = await getNextSequence("PAYOUT");
+  return `AJGK-PAY-${year}-${padSequence(seq)}`;
+};
+
 module.exports = {
   generateReceiptNumber,
   generateEnrollmentNumber,
   generatePassbookNumber,
+  generatePayoutNumber,
   getNextSequence,
   PASSBOOK_COUNTER_KEY,
   PASSBOOK_MAX,

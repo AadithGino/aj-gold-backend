@@ -7,11 +7,15 @@
     "start": "node server.js",
     "dev": "nodemon server.js",
     "seed:admin": "node src/seed/seedAdmin.js",
+    "seed:demo": "node src/seed/seedDemo.js",
+    "seed:cash-vault-demo": "node src/seed/seedCashVaultDemo.js",
     "smoke:phase2": "node src/seed/smokePhase2.js",
     "smoke:phase3": "node src/seed/smokePhase3.js",
     "smoke:phase4": "node src/seed/smokePhase4.js",
     "smoke:phase5": "node src/seed/smokePhase5.js",
-    "smoke:phase6": "node src/seed/smokePhase6.js"
+    "smoke:phase6": "node src/seed/smokePhase6.js",
+    "smoke:phase7": "node src/seed/smokePhase7.js",
+    "smoke:phase8": "node src/seed/smokePhase8.js"
   },
   "dependencies": {
     "bcryptjs": "^3.0.3",

@@ -4,16 +4,19 @@ const Scheme = require("../models/scheme.model");
 const Payment = require("../models/payment.model");
 const StaffProfile = require("../models/staffProfile.model");
 const CashSubmission = require("../models/cashSubmission.model");
+const CustomerPayout = require("../models/customerPayout.model");
 const {
   USER_ROLES,
   SCHEME_STATUS,
   PAYMENT_STATUS,
   PAYMENT_METHODS,
+  PAYOUT_STATUS,
 } = require("../constants/enums");
 const ApiError = require("../utils/ApiError");
 const { startOfDay, endOfDay, startOfMonth } = require("../utils/date");
 const dayjs = require("dayjs");
 const { getStaffCashInHand, getPaymentMethodBreakdown } = require("./cash.service");
+const { getCashPositionSummary } = require("./cashPosition.service");
 const { enrichScheme } = require("./customer.service");
 const { getSchemeLimitSummary } = require("./paymentLimit.service");
 
@@ -77,18 +80,12 @@ const getAdminDashboard = async () => {
   const [
     activeSchemes,
     todayBreakdown,
-    allTimeBreakdown,
-    totalCashSubmitted,
     recentPayments,
     staffUsers,
     topStaffRows,
   ] = await Promise.all([
     Scheme.countDocuments({ status: SCHEME_STATUS.ACTIVE }),
     getPaymentMethodBreakdown({ paymentDate: { $gte: todayStart, $lte: todayEnd } }),
-    getPaymentMethodBreakdown({}),
-    CashSubmission.aggregate([
-      { $group: { _id: null, total: { $sum: "$submittedAmount" } } },
-    ]),
     Payment.find({ status: PAYMENT_STATUS.SUCCESS })
       .sort({ paymentDate: -1 })
       .limit(5)
@@ -117,7 +114,7 @@ const getAdminDashboard = async () => {
   ]);
 
   const today = buildTodayMethodTotals(todayBreakdown);
-  const totalCashSubmittedToVault = totalCashSubmitted[0]?.total || 0;
+  const cashPosition = await getCashPositionSummary();
 
   const staffCashSummaries = await Promise.all(
     staffUsers.map(async (staff) => {
@@ -150,22 +147,14 @@ const getAdminDashboard = async () => {
   return {
     counts: { activeSchemes },
     today,
-    totalCashInVault: totalCashSubmittedToVault,
-    totalCashSubmittedToVault,
-    totalStaffCashInHand,
-    totalCashWithStaff: totalStaffCashInHand,
-    totalCollectedFromCustomers: allTimeBreakdown.reduce((sum, row) => sum + row.total, 0),
-    totalCashCollectedFromCustomers: sumMethod(allTimeBreakdown, PAYMENT_METHODS.CASH),
-    totalUpiCollectedFromCustomers: sumMethod(allTimeBreakdown, PAYMENT_METHODS.UPI),
-    totalBankCollectedFromCustomers: sumMethod(allTimeBreakdown, PAYMENT_METHODS.BANK),
-    totalCardCollectedFromCustomers: sumMethod(allTimeBreakdown, PAYMENT_METHODS.CARD),
+    ...cashPosition,
     pendingCashSubmissionSummary: {
       staffWithPendingCash: pendingStaff.length,
       totalPendingCash: totalStaffCashInHand,
     },
     topStaffByTodayCollection,
     recentPayments: recentPayments.map(mapPaymentItem),
-    payoutTrackingImplemented: false,
+    totalStaffCashInHand,
   };
 };
 
@@ -281,13 +270,18 @@ const getCustomerDashboard = async (user) => {
   const customer = await Customer.findOne({ user: user._id }).lean();
   if (!customer) throw new ApiError(404, "Customer profile not found.");
 
-  const [schemeDocs, paymentDocs, allTimePaid] = await Promise.all([
+  const [schemeDocs, paymentDocs, payoutDocs, allTimePaid] = await Promise.all([
     Scheme.find({ customer: customer._id }).sort({ createdAt: -1 }),
     Payment.find({ customer: customer._id, status: PAYMENT_STATUS.SUCCESS })
       .sort({ paymentDate: -1 })
       .limit(100)
       .populate("collectedBy", "name role")
       .populate("scheme", "enrollmentNumber schemeName status")
+      .lean(),
+    CustomerPayout.find({ customer: customer._id, status: PAYOUT_STATUS.SUCCESS })
+      .sort({ payoutDate: -1 })
+      .limit(50)
+      .populate("scheme", "enrollmentNumber status")
       .lean(),
     Payment.aggregate([
       { $match: { customer: customer._id, status: PAYMENT_STATUS.SUCCESS } },
@@ -316,6 +310,17 @@ const getCustomerDashboard = async (user) => {
     schemeHistory,
     paymentHistory,
     receipts: paymentHistory,
+    payoutHistory: payoutDocs.map((p) => ({
+      _id: p._id,
+      payoutNumber: p.payoutNumber,
+      payoutType: p.payoutType,
+      payoutMethod: p.payoutMethod,
+      amount: p.amount,
+      payoutDate: p.payoutDate,
+      referenceNumber: p.referenceNumber || "",
+      notes: p.notes || "",
+      scheme: p.scheme,
+    })),
     activeSchemeSummary: activeScheme
       ? {
           ...activeScheme,

@@ -79,11 +79,20 @@ const assertNoPasswordHash = (value, path = "root", seen = new WeakSet()) => {
 };
 
 const ADMIN_CASH_FIELDS = [
+  "cashInVault",
+  "totalCashInVault",
   "totalCollectedFromCustomers",
   "totalCashCollectedFromCustomers",
+  "totalUpiCollectedFromCustomers",
+  "totalBankCollectedFromCustomers",
+  "totalCardCollectedFromCustomers",
   "totalCashWithStaff",
   "totalCashSubmittedToVault",
-  "totalCashInVault",
+  "totalCustomerPayout",
+  "totalCashCustomerPayout",
+  "totalUpiCustomerPayout",
+  "totalBankCustomerPayout",
+  "totalCardCustomerPayout",
   "payoutTrackingImplemented",
 ];
 
@@ -160,7 +169,20 @@ const run = async () => {
     ADMIN_CASH_FIELDS.forEach((field) => {
       assert(Object.prototype.hasOwnProperty.call(adminDash, field), `Admin dashboard has ${field}`);
     });
-    assert(adminDash.payoutTrackingImplemented === false, "payoutTrackingImplemented is false");
+    assert(adminDash.payoutTrackingImplemented === true, "payoutTrackingImplemented is true");
+    assert(
+      adminDash.cashInVault === adminDash.totalCashInVault,
+      "cashInVault equals totalCashInVault on admin dashboard"
+    );
+    assert(
+      adminDash.cashInVault ===
+        adminDash.totalCashSubmittedToVault +
+          adminDash.totalUpiCollectedFromCustomers +
+          adminDash.totalBankCollectedFromCustomers +
+          adminDash.totalCardCollectedFromCustomers -
+          adminDash.totalCustomerPayout,
+      "Admin dashboard cashInVault formula holds"
+    );
     assertNoPasswordHash(adminDash, "adminDashboard");
 
     const staffDash = await getStaffDashboard(staffUser);

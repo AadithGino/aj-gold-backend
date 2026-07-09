@@ -1,6 +1,5 @@
 const mongoose = require("mongoose");
 const Payment = require("../models/payment.model");
-const PaymentCorrection = require("../models/paymentCorrection.model");
 const Customer = require("../models/customer.model");
 const Scheme = require("../models/scheme.model");
 const StaffProfile = require("../models/staffProfile.model");
@@ -10,7 +9,6 @@ const {
   PAYMENT_STATUS,
   SCHEME_STATUS,
   AUDIT_ACTIONS,
-  CORRECTION_TYPES,
 } = require("../constants/enums");
 const ApiError = require("../utils/ApiError");
 const { parseDateRange } = require("../utils/date");
@@ -294,46 +292,6 @@ const getPaymentReceipt = async (paymentId) => {
   };
 };
 
-const createCorrectionRequest = async (paymentId, payload, actor) => {
-  const payment = await getPaymentByIdOrThrow(paymentId);
-
-  const correction = await PaymentCorrection.create({
-    payment: payment._id,
-    requestedBy: actor._id,
-    requestedByRole: actor.role,
-    reason: payload.reason.trim(),
-    correctionType: payload.correctionType,
-    status: "PENDING",
-    notes: payload.notes?.trim() || "",
-  });
-
-  await logAudit({
-    actor: actor._id,
-    actorRole: actor.role,
-    action: AUDIT_ACTIONS.PAYMENT_CORRECTED,
-    targetType: "PaymentCorrection",
-    targetId: correction._id,
-    newValue: {
-      paymentId: payment._id,
-      correctionType: correction.correctionType,
-      status: correction.status,
-    },
-    notes: "Payment correction request submitted",
-  });
-
-  return {
-    _id: correction._id,
-    payment: correction.payment,
-    requestedBy: correction.requestedBy,
-    requestedByRole: correction.requestedByRole,
-    reason: correction.reason,
-    correctionType: correction.correctionType,
-    status: correction.status,
-    notes: correction.notes || "",
-    createdAt: correction.createdAt,
-  };
-};
-
 const reversePayment = async (paymentId, payload, actor) => {
   if (actor.role !== USER_ROLES.ADMIN) {
     throw new ApiError(403, "Only admin can reverse payments.");
@@ -388,10 +346,8 @@ module.exports = {
   listPayments,
   getPaymentDetail,
   getPaymentReceipt,
-  createCorrectionRequest,
   reversePayment,
   mapPayment,
   getPaymentByIdOrThrow,
   assertCollectorAllowed,
-  CORRECTION_TYPES,
 };
