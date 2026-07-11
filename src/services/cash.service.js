@@ -141,7 +141,7 @@ const getStaffCollectionTotal = async (staffId, from, to) => {
   return result[0]?.total || 0;
 };
 
-const getStaffPaymentHistory = async (staffId, { from, to, limit = 50 } = {}) => {
+const getStaffPaymentHistory = async (staffId, { from, to, limit = 50, paymentMethod } = {}) => {
   const staffObjectId = toObjectId(staffId, "staff id");
   const query = {
     collectedBy: staffObjectId,
@@ -156,6 +156,9 @@ const getStaffPaymentHistory = async (staffId, { from, to, limit = 50 } = {}) =>
     if (to) {
       query.paymentDate.$lte = to;
     }
+  }
+  if (paymentMethod) {
+    query.paymentMethod = paymentMethod;
   }
 
   return Payment.find(query)
@@ -200,7 +203,7 @@ const createCashSubmission = async (
     staff,
     submittedAmount,
     submissionDate: submissionDate || new Date(),
-    receivedBy: receivedBy.trim(),
+    receivedBy: (receivedBy?.trim() || actor?.name || "Admin"),
     notes: notes?.trim() || "",
     createdBy: actor._id,
   });

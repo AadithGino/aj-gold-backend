@@ -296,7 +296,7 @@ const getStaffSummaryBuckets = async (staffUserId) => {
   return { today, week, month, year };
 };
 
-const getStaffDetail = async (staffUserId, { from, to } = {}) => {
+const getStaffDetail = async (staffUserId, { from, to, limit, paymentMethod } = {}) => {
   const { user, profile } = await getStaffContextOrThrow(staffUserId);
   const now = new Date();
   const customRange = parseDateRange(from, to);
@@ -307,6 +307,8 @@ const getStaffDetail = async (staffUserId, { from, to } = {}) => {
 
   const rangeFrom = customRange.from || startOfMonth(now);
   const rangeTo = customRange.to || endOfDay(now);
+  const safeLimit = Math.max(1, Math.min(Number(limit) || 50, 500));
+  const paymentMethodFilter = paymentMethod && paymentMethod !== "ALL" ? paymentMethod : undefined;
 
   const [
     cashSummary,
@@ -325,7 +327,12 @@ const getStaffDetail = async (staffUserId, { from, to } = {}) => {
       collectedBy: staffUserId,
       paymentDate: { $gte: rangeFrom, $lte: rangeTo },
     }),
-    getStaffPaymentHistory(staffUserId, { from: rangeFrom, to: rangeTo, limit: 50 }),
+    getStaffPaymentHistory(staffUserId, {
+      from: rangeFrom,
+      to: rangeTo,
+      limit: safeLimit,
+      paymentMethod: paymentMethodFilter,
+    }),
     getStaffCashSubmissionHistory(staffUserId, { from: rangeFrom, to: rangeTo }),
     getStaffRedeemedClosedHistory(staffUserId),
     CustomerPayout.find({
@@ -336,7 +343,7 @@ const getStaffDetail = async (staffUserId, { from, to } = {}) => {
       .populate("customer", "name passbookNumber phone")
       .populate("scheme", "enrollmentNumber schemeName")
       .sort({ payoutDate: -1, createdAt: -1 })
-      .limit(50)
+      .limit(safeLimit)
       .lean(),
   ]);
 

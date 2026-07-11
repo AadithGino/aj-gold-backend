@@ -7,7 +7,6 @@ const createCashSubmissionSchema = z.object({
   staff: z.string().min(1, "Staff is required."),
   submittedAmount: z.coerce.number().positive("Submitted amount must be greater than zero."),
   submissionDate: z.coerce.date().optional(),
-  receivedBy: z.string().trim().min(2, "Received by is required."),
   notes: z.string().trim().optional(),
 });
 

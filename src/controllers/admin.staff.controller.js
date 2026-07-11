@@ -93,6 +93,8 @@ const getStaffHandler = asyncHandler(async (req, res) => {
   const detail = await getStaffDetail(req.params.staffId, {
     from: req.query.from,
     to: req.query.to,
+    limit: req.query.limit,
+    paymentMethod: req.query.paymentMethod,
   });
 
   return res.status(200).json({
