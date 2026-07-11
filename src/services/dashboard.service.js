@@ -13,9 +13,13 @@ const {
   PAYOUT_STATUS,
 } = require("../constants/enums");
 const ApiError = require("../utils/ApiError");
-const { startOfDay, endOfDay, startOfMonth } = require("../utils/date");
+const { startOfDay, endOfDay, startOfMonth, parseDateRange } = require("../utils/date");
 const dayjs = require("dayjs");
-const { getStaffCashInHand, getPaymentMethodBreakdown } = require("./cash.service");
+const {
+  getStaffCashInHand,
+  getPaymentMethodBreakdown,
+  getStaffCashSubmissionHistory,
+} = require("./cash.service");
 const { getCashPositionSummary } = require("./cashPosition.service");
 const { enrichScheme } = require("./customer.service");
 const { getSchemeLimitSummary } = require("./paymentLimit.service");
@@ -267,11 +271,18 @@ const getStaffDashboard = async (user) => {
 
 /* ─── Customer Dashboard ─────────────────────────────────────── */
 const getCustomerDashboard = async (user) => {
-  const customer = await Customer.findOne({ user: user._id }).lean();
+  const customer = await Customer.findOne({ user: user._id })
+    .populate("createdBy", "name role")
+    .populate("updatedBy", "name role")
+    .lean();
   if (!customer) throw new ApiError(404, "Customer profile not found.");
 
   const [schemeDocs, paymentDocs, payoutDocs, allTimePaid] = await Promise.all([
-    Scheme.find({ customer: customer._id }).sort({ createdAt: -1 }),
+    Scheme.find({ customer: customer._id })
+      .populate("createdBy", "name role")
+      .populate("updatedBy", "name role")
+      .populate("statusHistory.changedBy", "name role")
+      .sort({ createdAt: -1 }),
     Payment.find({ customer: customer._id, status: PAYMENT_STATUS.SUCCESS })
       .sort({ paymentDate: -1 })
       .limit(100)
@@ -303,6 +314,24 @@ const getCustomerDashboard = async (user) => {
 
   return {
     profile: customer,
+    profileAudit: {
+      createdBy: customer.createdBy
+        ? {
+            _id: customer.createdBy._id,
+            name: customer.createdBy.name || "",
+            role: customer.createdBy.role || null,
+          }
+        : null,
+      updatedBy: customer.updatedBy
+        ? {
+            _id: customer.updatedBy._id,
+            name: customer.updatedBy.name || "",
+            role: customer.updatedBy.role || null,
+          }
+        : null,
+      createdAt: customer.createdAt,
+      updatedAt: customer.updatedAt,
+    },
     passbookNumber: customer.passbookNumber,
     nominee: customer.nominee || {},
     activeScheme,
@@ -391,4 +420,49 @@ const getRoleProfile = async (user) => {
   };
 };
 
-module.exports = { getAdminDashboard, getStaffDashboard, getCustomerDashboard, getRoleProfile };
+const getStaffCashSubmissions = async (user, { from, to } = {}) => {
+  if (![USER_ROLES.ADMIN, USER_ROLES.STAFF].includes(user.role)) {
+    throw new ApiError(403, "Staff/Admin only.");
+  }
+
+  const customRange = parseDateRange(from, to);
+  if (customRange.error) {
+    throw new ApiError(400, customRange.error);
+  }
+
+  const [cashSummary, rows] = await Promise.all([
+    getStaffCashInHand(user._id),
+    getStaffCashSubmissionHistory(user._id, { from: customRange.from, to: customRange.to }),
+  ]);
+
+  const totalSubmittedInRange = rows.reduce((sum, row) => sum + (row.submittedAmount || 0), 0);
+
+  return {
+    cashSummary: {
+      cashInHand: cashSummary.cashInHand,
+      cashCollected: cashSummary.cashCollected,
+      cashSubmittedAllTime: cashSummary.cashSubmitted,
+      submittedInRange: totalSubmittedInRange,
+    },
+    range: {
+      from: customRange.from || null,
+      to: customRange.to || null,
+    },
+    submissions: rows.map((row) => ({
+      _id: row._id,
+      submittedAmount: row.submittedAmount,
+      submissionDate: row.submissionDate,
+      receivedBy: row.receivedBy || "Admin",
+      notes: row.notes || "",
+      createdAt: row.createdAt,
+    })),
+  };
+};
+
+module.exports = {
+  getAdminDashboard,
+  getStaffDashboard,
+  getCustomerDashboard,
+  getRoleProfile,
+  getStaffCashSubmissions,
+};

@@ -16,6 +16,19 @@ const { getNextSequence, generatePassbookNumber } = require("./receipt.service")
 const { logAudit } = require("./audit.service");
 const { getSchemeLimitSummary } = require("./paymentLimit.service");
 
+const getId = (value) => (value && typeof value === "object" ? value._id || null : value || null);
+const normalizeActor = (actor) => {
+  if (!actor) return null;
+  if (typeof actor === "object") {
+    return {
+      _id: actor._id || null,
+      name: actor.name || "",
+      role: actor.role || null,
+    };
+  }
+  return { _id: actor, name: "", role: null };
+};
+
 const sanitizeCustomer = (customer) => ({
   _id: customer._id,
   user: customer.user,
@@ -26,8 +39,8 @@ const sanitizeCustomer = (customer) => ({
   address: customer.address || "",
   nominee: customer.nominee || {},
   status: customer.status,
-  createdBy: customer.createdBy,
-  updatedBy: customer.updatedBy,
+  createdBy: getId(customer.createdBy),
+  updatedBy: getId(customer.updatedBy),
   createdAt: customer.createdAt,
   updatedAt: customer.updatedAt,
 });
@@ -73,9 +86,29 @@ const buildSchemeProgress = (scheme) => {
   };
 };
 
+const mapStatusHistory = (statusHistory = []) =>
+  statusHistory.map((entry) => ({
+    status: entry.status,
+    changedBy: normalizeActor(entry.changedBy),
+    changedByRole: entry.changedByRole || null,
+    changedAt: entry.changedAt,
+    notes: entry.notes || "",
+  }));
+
+const getLatestStatusEvent = (statusHistory, status) => {
+  for (let i = statusHistory.length - 1; i >= 0; i -= 1) {
+    if (statusHistory[i].status === status) return statusHistory[i];
+  }
+  return null;
+};
+
 const enrichScheme = async (scheme) => {
   const limitSummary = await getSchemeLimitSummary(scheme._id);
   const progress = buildSchemeProgress(scheme);
+  const statusHistory = mapStatusHistory(scheme.statusHistory || []);
+  const redeemedEvent = getLatestStatusEvent(statusHistory, SCHEME_STATUS.REDEEMED);
+  const closedEvent = getLatestStatusEvent(statusHistory, SCHEME_STATUS.CLOSED);
+  const withdrawnEvent = getLatestStatusEvent(statusHistory, SCHEME_STATUS.WITHDRAWN);
 
   return {
     _id: scheme._id,
@@ -86,7 +119,15 @@ const enrichScheme = async (scheme) => {
     sixMonthDate: scheme.sixMonthDate,
     maturityDate: scheme.maturityDate,
     status: scheme.status,
-    statusHistory: scheme.statusHistory || [],
+    statusHistory,
+    createdBy: normalizeActor(scheme.createdBy),
+    updatedBy: normalizeActor(scheme.updatedBy),
+    redeemedBy: redeemedEvent?.changedBy || null,
+    redeemedAt: redeemedEvent?.changedAt || null,
+    closedBy: closedEvent?.changedBy || null,
+    closedAt: closedEvent?.changedAt || null,
+    withdrawnBy: withdrawnEvent?.changedBy || null,
+    withdrawnAt: withdrawnEvent?.changedAt || null,
     totalPaid: limitSummary.totalPaid,
     firstSixMonthsPaid: limitSummary.firstSixMonthsPaid,
     afterSixMonthsPaid: limitSummary.afterSixMonthsPaid,
@@ -371,8 +412,18 @@ const searchCustomers = async (search = "") => {
 };
 
 const getCustomerDetail = async (customerId) => {
-  const customer = await getCustomerOrThrow(customerId);
-  const schemes = await Scheme.find({ customer: customerId }).sort({ createdAt: -1 });
+  const customer = await Customer.findById(customerId)
+    .populate("createdBy", "name role")
+    .populate("updatedBy", "name role");
+  if (!customer) {
+    throw new ApiError(404, "Customer not found.");
+  }
+
+  const schemes = await Scheme.find({ customer: customerId })
+    .populate("createdBy", "name role")
+    .populate("updatedBy", "name role")
+    .populate("statusHistory.changedBy", "name role")
+    .sort({ createdAt: -1 });
   const enrichedSchemes = await Promise.all(schemes.map((scheme) => enrichScheme(scheme)));
   const grouped = groupSchemes(enrichedSchemes);
 
@@ -410,6 +461,12 @@ const getCustomerDetail = async (customerId) => {
 
   return {
     customer: sanitizeCustomer(customer),
+    customerAudit: {
+      createdBy: normalizeActor(customer.createdBy),
+      updatedBy: normalizeActor(customer.updatedBy),
+      createdAt: customer.createdAt,
+      updatedAt: customer.updatedAt,
+    },
     nominee: customer.nominee || {},
     activeScheme: grouped.active,
     previousSchemes: grouped.previous,
@@ -426,7 +483,11 @@ const getCustomerDetail = async (customerId) => {
 
 const getCustomerSchemes = async (customerId) => {
   await getCustomerOrThrow(customerId);
-  const schemes = await Scheme.find({ customer: customerId }).sort({ createdAt: -1 });
+  const schemes = await Scheme.find({ customer: customerId })
+    .populate("createdBy", "name role")
+    .populate("updatedBy", "name role")
+    .populate("statusHistory.changedBy", "name role")
+    .sort({ createdAt: -1 });
   return Promise.all(schemes.map((scheme) => enrichScheme(scheme)));
 };
 

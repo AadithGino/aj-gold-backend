@@ -1,4 +1,10 @@
-const { getAdminDashboard, getStaffDashboard, getCustomerDashboard, getRoleProfile } = require("../services/dashboard.service");
+const {
+  getAdminDashboard,
+  getStaffDashboard,
+  getCustomerDashboard,
+  getRoleProfile,
+  getStaffCashSubmissions,
+} = require("../services/dashboard.service");
 const { USER_ROLES } = require("../constants/enums");
 const ApiError = require("../utils/ApiError");
 
@@ -14,6 +20,18 @@ const staffDashboardHandler = async (req, res, next) => {
     const data = await getStaffDashboard(req.user);
     res.json({ success: true, data });
   } catch (err) { next(err); }
+};
+
+const staffCashSubmissionsHandler = async (req, res, next) => {
+  try {
+    const data = await getStaffCashSubmissions(req.user, {
+      from: req.query.from,
+      to: req.query.to,
+    });
+    res.json({ success: true, data });
+  } catch (err) {
+    next(err);
+  }
 };
 
 const customerDashboardHandler = async (req, res, next) => {
@@ -33,6 +51,7 @@ const roleProfileHandler = async (req, res, next) => {
 module.exports = {
   adminDashboardHandler,
   staffDashboardHandler,
+  staffCashSubmissionsHandler,
   customerDashboardHandler,
   roleProfileHandler,
 };

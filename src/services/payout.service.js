@@ -54,8 +54,14 @@ const assertAdminOnly = (actor) => {
   }
 };
 
+const assertAdminOrStaff = (actor) => {
+  if (![USER_ROLES.ADMIN, USER_ROLES.STAFF].includes(actor.role)) {
+    throw new ApiError(403, "Only admin or staff can create payouts.");
+  }
+};
+
 const createPayout = async (payload, actor) => {
-  assertAdminOnly(actor);
+  assertAdminOrStaff(actor);
 
   const amount = Number(payload.amount);
   if (!amount || amount <= 0) throw new ApiError(400, "Amount must be greater than zero.");

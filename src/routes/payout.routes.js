@@ -1,6 +1,9 @@
 const express = require("express");
 const authMiddleware = require("../middleware/auth.middleware");
-const { adminOnlyMiddleware } = require("../middleware/staffPermission.middleware");
+const {
+  adminOnlyMiddleware,
+  staffPermissionMiddleware,
+} = require("../middleware/staffPermission.middleware");
 const {
   createPayoutHandler,
   listPayoutsHandler,
@@ -11,9 +14,11 @@ const {
 const router = express.Router();
 
 router.use(authMiddleware);
+
+router.post("/", staffPermissionMiddleware("canCollectPayment"), createPayoutHandler);
+
 router.use(adminOnlyMiddleware);
 
-router.post("/", createPayoutHandler);
 router.get("/", listPayoutsHandler);
 router.get("/:payoutId", getPayoutHandler);
 router.post("/:payoutId/reverse", reversePayoutHandler);
