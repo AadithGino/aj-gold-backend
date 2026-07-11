@@ -177,6 +177,7 @@ const run = async () => {
     assert(
       adminDash.cashInVault ===
         adminDash.totalCashSubmittedToVault +
+          (adminDash.totalAdminCashCollected || 0) +
           adminDash.totalUpiCollectedFromCustomers +
           adminDash.totalBankCollectedFromCustomers +
           adminDash.totalCardCollectedFromCustomers -

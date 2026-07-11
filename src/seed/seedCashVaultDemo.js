@@ -293,6 +293,7 @@ const verifyCashPosition = async (cash) => {
 
   const formula =
     cash.totalCashSubmittedToVault +
+    (cash.totalAdminCashCollected || 0) +
     cash.totalUpiCollectedFromCustomers +
     cash.totalBankCollectedFromCustomers +
     cash.totalCardCollectedFromCustomers -

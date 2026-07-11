@@ -56,6 +56,21 @@ const getStaffCashInHand = async (staffId) => {
   };
 };
 
+const getAdminCashCollected = async () => {
+  const result = await Payment.aggregate([
+    {
+      $match: {
+        collectedByRole: USER_ROLES.ADMIN,
+        paymentMethod: PAYMENT_METHODS.CASH,
+        status: PAYMENT_STATUS.SUCCESS,
+      },
+    },
+    { $group: { _id: null, total: { $sum: "$amount" } } },
+  ]);
+
+  return result[0]?.total || 0;
+};
+
 const getPaymentMethodBreakdown = async (filter = {}) => {
   const match = { status: PAYMENT_STATUS.SUCCESS, ...filter };
   if (match.collectedBy) {
@@ -260,6 +275,7 @@ module.exports = {
   getStaffCashCollected,
   getStaffCashSubmitted,
   getStaffCashInHand,
+  getAdminCashCollected,
   getPaymentMethodBreakdown,
   getReceiptDisplayData,
   getStaffCollectionTotal,

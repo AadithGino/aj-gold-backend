@@ -7,7 +7,7 @@ const {
   PAYMENT_STATUS,
   SCHEME_STATUS,
 } = require("../constants/enums");
-const { getStaffCashInHand, getPaymentMethodBreakdown } = require("./cash.service");
+const { getStaffCashInHand, getPaymentMethodBreakdown, getAdminCashCollected } = require("./cash.service");
 
 const sumMethod = (rows, method) =>
   rows.find((row) => row.paymentMethod === method)?.total || 0;
@@ -64,6 +64,7 @@ const getSettlementTotals = async () => {
 
 const buildCashPositionPayload = ({
   totalCashSubmittedToVault,
+  totalAdminCashCollected,
   totalCashCollectedFromCustomers,
   totalUpiCollectedFromCustomers,
   totalBankCollectedFromCustomers,
@@ -79,6 +80,7 @@ const buildCashPositionPayload = ({
 
   const cashInVault =
     totalCashSubmittedToVault +
+    totalAdminCashCollected +
     totalUpiCollectedFromCustomers +
     totalBankCollectedFromCustomers +
     totalCardCollectedFromCustomers -
@@ -95,6 +97,7 @@ const buildCashPositionPayload = ({
     totalCardCollectedFromCustomers,
     totalCashWithStaff,
     totalCashSubmittedToVault,
+    totalAdminCashCollected,
     totalCustomerSettlement: settlementTotals.totalCustomerSettlement,
     totalCashCustomerSettlement: settlementTotals.totalCashCustomerSettlement,
     totalUpiCustomerSettlement: settlementTotals.totalUpiCustomerSettlement,
@@ -105,6 +108,7 @@ const buildCashPositionPayload = ({
       cashInVault,
       totalCashWithStaff,
       totalCashSubmittedToVault,
+      totalAdminCashCollected,
       totalCustomerSettlement: settlementTotals.totalCustomerSettlement,
     },
     collectionBreakdown: {
@@ -113,6 +117,7 @@ const buildCashPositionPayload = ({
       totalBankCollectedFromCustomers,
       totalCardCollectedFromCustomers,
       totalCollectedFromCustomers,
+      totalAdminCashCollected,
     },
     settlementBreakdown: {
       totalCashCustomerSettlement: settlementTotals.totalCashCustomerSettlement,
@@ -125,12 +130,13 @@ const buildCashPositionPayload = ({
 };
 
 const getCashPositionSummary = async () => {
-  const [allTimeBreakdown, totalCashSubmitted, settlementTotals, staffUsers] =
+  const [allTimeBreakdown, totalCashSubmitted, totalAdminCashCollected, settlementTotals, staffUsers] =
     await Promise.all([
       getPaymentMethodBreakdown({ status: PAYMENT_STATUS.SUCCESS }),
       CashSubmission.aggregate([
         { $group: { _id: null, total: { $sum: "$submittedAmount" } } },
       ]),
+      getAdminCashCollected(),
       getSettlementTotals(),
       User.find({ role: USER_ROLES.STAFF, status: "ACTIVE" }).select("_id").lean(),
     ]);
@@ -151,6 +157,7 @@ const getCashPositionSummary = async () => {
 
   return buildCashPositionPayload({
     totalCashSubmittedToVault,
+    totalAdminCashCollected,
     totalCashCollectedFromCustomers,
     totalUpiCollectedFromCustomers,
     totalBankCollectedFromCustomers,
