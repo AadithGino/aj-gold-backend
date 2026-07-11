@@ -4,6 +4,8 @@ const {
   getCustomerDashboard,
   getRoleProfile,
   getStaffCashSubmissions,
+  getStaffPayoutHistory,
+  getCustomerPayoutHistory,
 } = require("../services/dashboard.service");
 const { USER_ROLES } = require("../constants/enums");
 const ApiError = require("../utils/ApiError");
@@ -41,6 +43,34 @@ const customerDashboardHandler = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
+const staffPayoutHistoryHandler = async (req, res, next) => {
+  try {
+    const data = await getStaffPayoutHistory(req.user, {
+      from: req.query.from,
+      to: req.query.to,
+      method: req.query.method,
+      payoutType: req.query.payoutType,
+    });
+    res.json({ success: true, data });
+  } catch (err) {
+    next(err);
+  }
+};
+
+const customerPayoutHistoryHandler = async (req, res, next) => {
+  try {
+    const data = await getCustomerPayoutHistory(req.user, {
+      from: req.query.from,
+      to: req.query.to,
+      method: req.query.method,
+      payoutType: req.query.payoutType,
+    });
+    res.json({ success: true, data });
+  } catch (err) {
+    next(err);
+  }
+};
+
 const roleProfileHandler = async (req, res, next) => {
   try {
     const data = await getRoleProfile(req.user);
@@ -52,6 +82,8 @@ module.exports = {
   adminDashboardHandler,
   staffDashboardHandler,
   staffCashSubmissionsHandler,
+  staffPayoutHistoryHandler,
   customerDashboardHandler,
+  customerPayoutHistoryHandler,
   roleProfileHandler,
 };

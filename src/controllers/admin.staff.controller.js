@@ -95,6 +95,8 @@ const getStaffHandler = asyncHandler(async (req, res) => {
     to: req.query.to,
     limit: req.query.limit,
     paymentMethod: req.query.paymentMethod,
+    payoutMethod: req.query.payoutMethod,
+    payoutType: req.query.payoutType,
   });
 
   return res.status(200).json({

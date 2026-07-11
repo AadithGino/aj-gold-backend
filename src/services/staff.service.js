@@ -296,7 +296,10 @@ const getStaffSummaryBuckets = async (staffUserId) => {
   return { today, week, month, year };
 };
 
-const getStaffDetail = async (staffUserId, { from, to, limit, paymentMethod } = {}) => {
+const getStaffDetail = async (
+  staffUserId,
+  { from, to, limit, paymentMethod, payoutMethod, payoutType } = {}
+) => {
   const { user, profile } = await getStaffContextOrThrow(staffUserId);
   const now = new Date();
   const customRange = parseDateRange(from, to);
@@ -339,6 +342,8 @@ const getStaffDetail = async (staffUserId, { from, to, limit, paymentMethod } = 
       paidBy: staffUserId,
       status: PAYOUT_STATUS.SUCCESS,
       payoutDate: { $gte: rangeFrom, $lte: rangeTo },
+      ...(payoutMethod ? { payoutMethod } : {}),
+      ...(payoutType ? { payoutType } : {}),
     })
       .populate("customer", "name passbookNumber phone")
       .populate("scheme", "enrollmentNumber schemeName")
