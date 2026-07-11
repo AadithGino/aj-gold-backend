@@ -84,6 +84,7 @@ const getAdminDashboard = async () => {
   const [
     activeSchemes,
     pendingRedemptions,
+    pendingRedemptionSchemes,
     todayBreakdown,
     recentPayments,
     staffUsers,
@@ -96,6 +97,16 @@ const getAdminDashboard = async () => {
         $nin: [SCHEME_STATUS.REDEEMED, SCHEME_STATUS.CLOSED, SCHEME_STATUS.WITHDRAWN],
       },
     }),
+    Scheme.find({
+      maturityDate: { $lte: todayEnd },
+      status: {
+        $nin: [SCHEME_STATUS.REDEEMED, SCHEME_STATUS.CLOSED, SCHEME_STATUS.WITHDRAWN],
+      },
+    })
+      .sort({ maturityDate: 1 })
+      .limit(5)
+      .populate("customer", "name phone passbookNumber")
+      .lean(),
     getPaymentMethodBreakdown({ paymentDate: { $gte: todayStart, $lte: todayEnd } }),
     Payment.find({ status: PAYMENT_STATUS.SUCCESS })
       .sort({ paymentDate: -1 })
@@ -155,6 +166,17 @@ const getAdminDashboard = async () => {
     })
     .filter(Boolean);
 
+  const pendingRedemptionsPreview = pendingRedemptionSchemes.map((scheme) => ({
+    schemeId: scheme._id,
+    customerId: scheme.customer?._id || null,
+    customerName: scheme.customer?.name || "—",
+    passbookNumber: scheme.customer?.passbookNumber || "—",
+    phone: scheme.customer?.phone || "—",
+    enrollmentNumber: scheme.enrollmentNumber,
+    maturityDate: scheme.maturityDate,
+    status: scheme.status,
+  }));
+
   return {
     counts: { activeSchemes, pendingRedemptions },
     today,
@@ -164,6 +186,7 @@ const getAdminDashboard = async () => {
       totalPendingCash: totalStaffCashInHand,
     },
     topStaffByTodayCollection,
+    pendingRedemptionsPreview,
     recentPayments: recentPayments.map(mapPaymentItem),
     totalStaffCashInHand,
   };

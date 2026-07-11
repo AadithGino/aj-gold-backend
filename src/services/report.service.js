@@ -9,6 +9,7 @@ const {
   USER_ROLES,
   PAYMENT_METHODS,
   PAYMENT_STATUS,
+  SCHEME_STATUS,
 } = require("../constants/enums");
 const ApiError = require("../utils/ApiError");
 const { parseDateRange, startOfDay, endOfDay } = require("../utils/date");
@@ -278,35 +279,51 @@ const getMaturityCalendar = async (filters = {}) => {
   };
   if (filters.status) query.status = filters.status;
 
-  const schemes = await Scheme.find(query).sort({ maturityDate: 1 }).lean();
+  const pendingQuery = {
+    maturityDate: { $lte: endOfDay(new Date()) },
+    status: { $nin: [SCHEME_STATUS.REDEEMED, SCHEME_STATUS.CLOSED, SCHEME_STATUS.WITHDRAWN] },
+  };
+
+  const [schemes, pendingSchemes] = await Promise.all([
+    Scheme.find(query).sort({ maturityDate: 1 }).lean(),
+    Scheme.find(pendingQuery).sort({ maturityDate: 1 }).lean(),
+  ]);
+
   const customers = await Customer.find({
-    _id: { $in: schemes.map((s) => s.customer) },
+    _id: { $in: [...schemes.map((s) => s.customer), ...pendingSchemes.map((s) => s.customer)] },
   }).lean();
   const customerMap = new Map(customers.map((c) => [String(c._id), c]));
   const today = startOfDay(new Date());
 
+  const buildEntry = async (scheme) => {
+    const limit = await getSchemeLimitSummary(scheme._id);
+    const customer = customerMap.get(String(scheme.customer));
+    const maturity = new Date(scheme.maturityDate);
+    const daysRemaining = Math.ceil(
+      (maturity.getTime() - today.getTime()) / (1000 * 60 * 60 * 24)
+    );
+    return {
+      schemeId: scheme._id,
+      customerId: customer?._id || scheme.customer,
+      customerName: customer?.name || "—",
+      phone: customer?.phone || "—",
+      passbookNumber: customer?.passbookNumber || "—",
+      enrollmentNumber: scheme.enrollmentNumber,
+      maturityDate: scheme.maturityDate,
+      totalPaid: limit.totalPaid,
+      status: scheme.status,
+      daysRemaining,
+      monthKey: dayjs(maturity).format("YYYY-MM"),
+      dateKey: dayjs(maturity).format("YYYY-MM-DD"),
+    };
+  };
+
   const entries = await Promise.all(
-    schemes.map(async (scheme) => {
-      const limit = await getSchemeLimitSummary(scheme._id);
-      const customer = customerMap.get(String(scheme.customer));
-      const maturity = new Date(scheme.maturityDate);
-      const daysRemaining = Math.ceil(
-        (maturity.getTime() - today.getTime()) / (1000 * 60 * 60 * 24)
-      );
-      return {
-        schemeId: scheme._id,
-        customerName: customer?.name || "—",
-        phone: customer?.phone || "—",
-        passbookNumber: customer?.passbookNumber || "—",
-        enrollmentNumber: scheme.enrollmentNumber,
-        maturityDate: scheme.maturityDate,
-        totalPaid: limit.totalPaid,
-        status: scheme.status,
-        daysRemaining,
-        monthKey: dayjs(maturity).format("YYYY-MM"),
-        dateKey: dayjs(maturity).format("YYYY-MM-DD"),
-      };
-    })
+    schemes.map((scheme) => buildEntry(scheme))
+  );
+
+  const pendingEntries = await Promise.all(
+    pendingSchemes.map((scheme) => buildEntry(scheme))
   );
 
   const groupedByMonth = entries.reduce((acc, entry) => {
@@ -319,8 +336,10 @@ const getMaturityCalendar = async (filters = {}) => {
     from,
     to,
     entries,
+    pendingEntries,
     groupedByMonth,
     count: entries.length,
+    pendingCount: pendingEntries.length,
   };
 };
 
