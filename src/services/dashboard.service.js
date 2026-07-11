@@ -4,13 +4,11 @@ const Scheme = require("../models/scheme.model");
 const Payment = require("../models/payment.model");
 const StaffProfile = require("../models/staffProfile.model");
 const CashSubmission = require("../models/cashSubmission.model");
-const CustomerPayout = require("../models/customerPayout.model");
 const {
   USER_ROLES,
   SCHEME_STATUS,
   PAYMENT_STATUS,
   PAYMENT_METHODS,
-  PAYOUT_STATUS,
 } = require("../constants/enums");
 const ApiError = require("../utils/ApiError");
 const { startOfDay, endOfDay, startOfMonth, parseDateRange } = require("../utils/date");
@@ -94,13 +92,13 @@ const getAdminDashboard = async () => {
     Scheme.countDocuments({
       maturityDate: { $lte: todayEnd },
       status: {
-        $nin: [SCHEME_STATUS.REDEEMED, SCHEME_STATUS.CLOSED, SCHEME_STATUS.WITHDRAWN],
+        $nin: [SCHEME_STATUS.REDEEMED, SCHEME_STATUS.CLOSED],
       },
     }),
     Scheme.find({
       maturityDate: { $lte: todayEnd },
       status: {
-        $nin: [SCHEME_STATUS.REDEEMED, SCHEME_STATUS.CLOSED, SCHEME_STATUS.WITHDRAWN],
+        $nin: [SCHEME_STATUS.REDEEMED, SCHEME_STATUS.CLOSED],
       },
     })
       .sort({ maturityDate: 1 })
@@ -366,7 +364,7 @@ const getCustomerDashboard = async (user) => {
     .lean();
   if (!customer) throw new ApiError(404, "Customer profile not found.");
 
-  const [schemeDocs, paymentDocs, payoutDocs, allTimePaid] = await Promise.all([
+  const [schemeDocs, paymentDocs, allTimePaid] = await Promise.all([
     Scheme.find({ customer: customer._id })
       .populate("createdBy", "name role")
       .populate("updatedBy", "name role")
@@ -377,11 +375,6 @@ const getCustomerDashboard = async (user) => {
       .limit(100)
       .populate("collectedBy", "name role")
       .populate("scheme", "enrollmentNumber schemeName status")
-      .lean(),
-    CustomerPayout.find({ customer: customer._id, status: PAYOUT_STATUS.SUCCESS })
-      .sort({ payoutDate: -1 })
-      .limit(50)
-      .populate("scheme", "enrollmentNumber status")
       .lean(),
     Payment.aggregate([
       { $match: { customer: customer._id, status: PAYMENT_STATUS.SUCCESS } },
@@ -428,17 +421,6 @@ const getCustomerDashboard = async (user) => {
     schemeHistory,
     paymentHistory,
     receipts: paymentHistory,
-    payoutHistory: payoutDocs.map((p) => ({
-      _id: p._id,
-      payoutNumber: p.payoutNumber,
-      payoutType: p.payoutType,
-      payoutMethod: p.payoutMethod,
-      amount: p.amount,
-      payoutDate: p.payoutDate,
-      referenceNumber: p.referenceNumber || "",
-      notes: p.notes || "",
-      scheme: p.scheme,
-    })),
     activeSchemeSummary: activeScheme
       ? {
           ...activeScheme,
@@ -544,132 +526,6 @@ const getStaffCashSubmissions = async (user, { from, to } = {}) => {
       receivedBy: row.receivedBy || "Admin",
       notes: row.notes || "",
       createdAt: row.createdAt,
-    })),
-  };
-};
-
-const getStaffPayoutHistory = async (user, { from, to, method, payoutType } = {}) => {
-  if (![USER_ROLES.ADMIN, USER_ROLES.STAFF].includes(user.role)) {
-    throw new ApiError(403, "Staff/Admin only.");
-  }
-
-  const customRange = parseDateRange(from, to);
-  if (customRange.error) {
-    throw new ApiError(400, customRange.error);
-  }
-
-  const query = {
-    paidBy: user._id,
-    status: PAYOUT_STATUS.SUCCESS,
-  };
-  if (customRange.from || customRange.to) {
-    query.payoutDate = {};
-    if (customRange.from) query.payoutDate.$gte = customRange.from;
-    if (customRange.to) query.payoutDate.$lte = customRange.to;
-  }
-  if (method) query.payoutMethod = method;
-  if (payoutType) query.payoutType = payoutType;
-
-  const rows = await CustomerPayout.find(query)
-    .sort({ payoutDate: -1, createdAt: -1 })
-    .limit(500)
-    .populate("customer", "name passbookNumber phone")
-    .populate("scheme", "enrollmentNumber schemeName status")
-    .lean();
-
-  return {
-    range: {
-      from: customRange.from || null,
-      to: customRange.to || null,
-    },
-    summary: {
-      totalAmount: rows.reduce((sum, row) => sum + (row.amount || 0), 0),
-      count: rows.length,
-    },
-    items: rows.map((p) => ({
-      _id: p._id,
-      payoutNumber: p.payoutNumber,
-      payoutType: p.payoutType,
-      payoutMethod: p.payoutMethod,
-      amount: p.amount,
-      payoutDate: p.payoutDate,
-      customer: p.customer
-        ? {
-            _id: p.customer._id,
-            name: p.customer.name,
-            passbookNumber: p.customer.passbookNumber,
-            phone: p.customer.phone,
-          }
-        : null,
-      scheme: p.scheme
-        ? {
-            _id: p.scheme._id,
-            enrollmentNumber: p.scheme.enrollmentNumber,
-            schemeName: p.scheme.schemeName,
-            status: p.scheme.status,
-          }
-        : null,
-    })),
-  };
-};
-
-const getCustomerPayoutHistory = async (user, { from, to, method, payoutType } = {}) => {
-  if (user.role !== USER_ROLES.CUSTOMER) {
-    throw new ApiError(403, "Customer only.");
-  }
-
-  const customer = await Customer.findOne({ user: user._id }).lean();
-  if (!customer) throw new ApiError(404, "Customer profile not found.");
-
-  const customRange = parseDateRange(from, to);
-  if (customRange.error) {
-    throw new ApiError(400, customRange.error);
-  }
-
-  const query = {
-    customer: customer._id,
-    status: PAYOUT_STATUS.SUCCESS,
-  };
-  if (customRange.from || customRange.to) {
-    query.payoutDate = {};
-    if (customRange.from) query.payoutDate.$gte = customRange.from;
-    if (customRange.to) query.payoutDate.$lte = customRange.to;
-  }
-  if (method) query.payoutMethod = method;
-  if (payoutType) query.payoutType = payoutType;
-
-  const rows = await CustomerPayout.find(query)
-    .sort({ payoutDate: -1, createdAt: -1 })
-    .limit(500)
-    .populate("scheme", "enrollmentNumber schemeName status")
-    .lean();
-
-  return {
-    range: {
-      from: customRange.from || null,
-      to: customRange.to || null,
-    },
-    summary: {
-      totalAmount: rows.reduce((sum, row) => sum + (row.amount || 0), 0),
-      count: rows.length,
-    },
-    items: rows.map((p) => ({
-      _id: p._id,
-      payoutNumber: p.payoutNumber,
-      payoutType: p.payoutType,
-      payoutMethod: p.payoutMethod,
-      amount: p.amount,
-      payoutDate: p.payoutDate,
-      referenceNumber: p.referenceNumber || "",
-      notes: p.notes || "",
-      scheme: p.scheme
-        ? {
-            _id: p.scheme._id,
-            enrollmentNumber: p.scheme.enrollmentNumber,
-            schemeName: p.scheme.schemeName,
-            status: p.scheme.status,
-          }
-        : null,
     })),
   };
 };

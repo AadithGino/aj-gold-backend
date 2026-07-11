@@ -13,7 +13,6 @@ const dashboardRoutes    = require("./routes/dashboard.routes");
 const reportRoutes       = require("./routes/report.routes");
 const notificationRoutes = require("./routes/notification.routes");
 const correctionRoutes   = require("./routes/correction.routes");
-const payoutRoutes         = require("./routes/payout.routes");
 const { notFound, errorHandler } = require("./middleware/error.middleware");
 
 const app = express();
@@ -38,7 +37,6 @@ app.use("/api/dashboard",     dashboardRoutes);
 app.use("/api/reports",       reportRoutes);
 app.use("/api/notifications", notificationRoutes);
 app.use("/api/corrections",   correctionRoutes);
-app.use("/api/payouts",         payoutRoutes);
 
 app.use(notFound);
 app.use(errorHandler);

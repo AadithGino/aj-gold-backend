@@ -240,16 +240,16 @@ const run = async () => {
     assert(typeof cashPosition.totalCollectedFromCustomers === "number", "Cash position has totalCollectedFromCustomers");
     assert(typeof cashPosition.totalCashInVault === "number", "Cash position has totalCashInVault");
     assert(cashPosition.totalCashInVault === cashPosition.cashInVault, "totalCashInVault equals cashInVault");
-    assert(cashPosition.payoutTrackingImplemented === true, "Cash position payoutTrackingImplemented is true");
-    assert(typeof cashPosition.totalCustomerPayout === "number", "Cash position has totalCustomerPayout");
-    assert(typeof cashPosition.totalCashCustomerPayout === "number", "Cash position has totalCashCustomerPayout");
+    assert(cashPosition.settlementTrackingImplemented === true, "Cash position settlementTrackingImplemented is true");
+    assert(typeof cashPosition.totalCustomerSettlement === "number", "Cash position has totalCustomerSettlement");
+    assert(typeof cashPosition.totalCashCustomerSettlement === "number", "Cash position has totalCashCustomerSettlement");
     assert(
       cashPosition.cashInVault ===
         cashPosition.totalCashSubmittedToVault +
           cashPosition.totalUpiCollectedFromCustomers +
           cashPosition.totalBankCollectedFromCustomers +
           cashPosition.totalCardCollectedFromCustomers -
-          cashPosition.totalCustomerPayout,
+          cashPosition.totalCustomerSettlement,
       "Cash position cashInVault formula holds"
     );
 

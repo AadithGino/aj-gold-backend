@@ -161,7 +161,9 @@ const run = async () => {
   assert(redeemed.status === SCHEME_STATUS.REDEEMED, "Scheme status updated to REDEEMED");
   assert(
     redeemed.statusHistory.some(
-      (entry) => entry.status === SCHEME_STATUS.REDEEMED && entry.changedBy.toString() === admin._id.toString()
+      (entry) =>
+        entry.status === SCHEME_STATUS.REDEEMED &&
+        (entry.changedBy?._id || entry.changedBy)?.toString() === admin._id.toString()
     ),
     "statusHistory records actor for REDEEMED"
   );
@@ -175,12 +177,17 @@ const run = async () => {
   assert(closed.status === SCHEME_STATUS.CLOSED, "Scheme status updated to CLOEED");
 
   const scheme3 = await createScheme({ customerId: customer._id.toString(), startDate: new Date("2026-02-01") }, admin);
-  const withdrawn = await updateSchemeStatus(
-    scheme3._id,
-    { status: SCHEME_STATUS.WITHDRAWN, notes: "Smoke withdraw" },
-    admin
-  );
-  assert(withdrawn.status === SCHEME_STATUS.WITHDRAWN, "Scheme status updated to WITHDRAWN");
+  let withdrawRejected = false;
+  try {
+    await updateSchemeStatus(
+      scheme3._id,
+      { status: "WITHDRAWN", notes: "Smoke withdraw" },
+      admin
+    );
+  } catch (error) {
+    withdrawRejected = error.statusCode === 400;
+  }
+  assert(withdrawRejected, "Legacy WITHDRAWN status is rejected");
 
   const byPassbook = await searchCustomers(passbookNumber);
   assert(byPassbook.some((item) => item._id.toString() === customer._id.toString()), "Search by generated passbookNumber");

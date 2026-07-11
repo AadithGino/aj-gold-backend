@@ -9,6 +9,8 @@ const staffProfileSchema = new mongoose.Schema(
       canCreateCustomer:    { type: Boolean, default: true },
       canViewReports:       { type: Boolean, default: false },
       canSubmitCash:        { type: Boolean, default: true },
+      canMarkRedeemed:      { type: Boolean, default: true },
+      canMarkClosed:        { type: Boolean, default: true },
     },
     calculatedCashInHand: { type: Number, default: 0 },
   },

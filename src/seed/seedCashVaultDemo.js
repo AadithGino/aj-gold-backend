@@ -16,7 +16,6 @@ const Customer = require("../models/customer.model");
 const Scheme = require("../models/scheme.model");
 const Payment = require("../models/payment.model");
 const CashSubmission = require("../models/cashSubmission.model");
-const CustomerPayout = require("../models/customerPayout.model");
 const PaymentCorrection = require("../models/paymentCorrection.model");
 const StaffProfile = require("../models/staffProfile.model");
 const ReceiptCounter = require("../models/receiptCounter.model");
@@ -27,14 +26,12 @@ const {
   USER_STATUS,
   PAYMENT_METHODS,
   PAYMENT_STATUS,
-  PAYOUT_TYPES,
 } = require("../constants/enums");
 const { createStaff } = require("../services/staff.service");
 const { createCustomer } = require("../services/customer.service");
-const { createScheme } = require("../services/schemeManagement.service");
+const { createScheme, updateSchemeStatus } = require("../services/schemeManagement.service");
 const { collectPayment } = require("../services/payment.service");
 const { createCashSubmission, getStaffCashInHand } = require("../services/cash.service");
-const { createPayout } = require("../services/payout.service");
 const { getCashPositionSummary } = require("../services/cashPosition.service");
 const { getAdminDashboard } = require("../services/dashboard.service");
 const {
@@ -180,44 +177,15 @@ const EXPECTED = {
   totalCardCollectedFromCustomers: 80000,
   totalCashSubmittedToVault: 350000,
   totalCashWithStaff: 150000,
-  totalCustomerPayout: 110000,
-  totalCashCustomerPayout: 50000,
-  totalUpiCustomerPayout: 20000,
-  totalBankCustomerPayout: 30000,
-  totalCardCustomerPayout: 10000,
-  cashInVault: 620000,
+  totalCustomerSettlement: 580000,
+  totalCashCustomerSettlement: 340000,
+  totalUpiCustomerSettlement: 110000,
+  totalBankCustomerSettlement: 80000,
+  totalCardCustomerSettlement: 60000,
+  cashInVault: 150000,
 };
 
-const PAYOUTS = [
-  {
-    customerKey: "meera",
-    payoutMethod: PAYMENT_METHODS.CASH,
-    amount: 50000,
-    payoutType: PAYOUT_TYPES.REDEMPTION,
-    referenceNumber: "CVD-MEERA-CASH-PAY",
-  },
-  {
-    customerKey: "deepak",
-    payoutMethod: PAYMENT_METHODS.UPI,
-    amount: 20000,
-    payoutType: PAYOUT_TYPES.WITHDRAWAL,
-    referenceNumber: "CVD-DEEPAK-UPI-PAY",
-  },
-  {
-    customerKey: "suresh",
-    payoutMethod: PAYMENT_METHODS.BANK,
-    amount: 30000,
-    payoutType: PAYOUT_TYPES.REDEMPTION,
-    referenceNumber: "CVD-SURESH-BANK-PAY",
-  },
-  {
-    customerKey: "joseph",
-    payoutMethod: PAYMENT_METHODS.CARD,
-    amount: 10000,
-    payoutType: PAYOUT_TYPES.ADJUSTMENT,
-    referenceNumber: "CVD-JOSEPH-CARD-PAY",
-  },
-];
+const REDEMPTION_CUSTOMER_KEYS = ["meera", "deepak", "suresh", "joseph"];
 
 const log = (msg) => console.log(msg);
 const fail = (msg) => {
@@ -269,7 +237,6 @@ const clearDatabase = async () => {
   log("\nClearing all app collections...");
   await Promise.all([
     PaymentCorrection.deleteMany({}),
-    CustomerPayout.deleteMany({}),
     Payment.deleteMany({}),
     CashSubmission.deleteMany({}),
     Scheme.deleteMany({}),
@@ -305,11 +272,11 @@ const verifyCashPosition = async (cash) => {
   assertEq(cash.totalCardCollectedFromCustomers, EXPECTED.totalCardCollectedFromCustomers, "totalCardCollectedFromCustomers");
   assertEq(cash.totalCashSubmittedToVault, EXPECTED.totalCashSubmittedToVault, "totalCashSubmittedToVault");
   assertEq(cash.totalCashWithStaff, EXPECTED.totalCashWithStaff, "totalCashWithStaff");
-  assertEq(cash.totalCustomerPayout, EXPECTED.totalCustomerPayout, "totalCustomerPayout");
-  assertEq(cash.totalCashCustomerPayout, EXPECTED.totalCashCustomerPayout, "totalCashCustomerPayout");
-  assertEq(cash.totalUpiCustomerPayout, EXPECTED.totalUpiCustomerPayout, "totalUpiCustomerPayout");
-  assertEq(cash.totalBankCustomerPayout, EXPECTED.totalBankCustomerPayout, "totalBankCustomerPayout");
-  assertEq(cash.totalCardCustomerPayout, EXPECTED.totalCardCustomerPayout, "totalCardCustomerPayout");
+  assertEq(cash.totalCustomerSettlement, EXPECTED.totalCustomerSettlement, "totalCustomerSettlement");
+  assertEq(cash.totalCashCustomerSettlement, EXPECTED.totalCashCustomerSettlement, "totalCashCustomerSettlement");
+  assertEq(cash.totalUpiCustomerSettlement, EXPECTED.totalUpiCustomerSettlement, "totalUpiCustomerSettlement");
+  assertEq(cash.totalBankCustomerSettlement, EXPECTED.totalBankCustomerSettlement, "totalBankCustomerSettlement");
+  assertEq(cash.totalCardCustomerSettlement, EXPECTED.totalCardCustomerSettlement, "totalCardCustomerSettlement");
   assertEq(cash.cashInVault, EXPECTED.cashInVault, "cashInVault");
   assertEq(cash.totalCashInVault, EXPECTED.cashInVault, "totalCashInVault");
   if (cash.totalCustomerMoneyHeld != null) {
@@ -317,11 +284,11 @@ const verifyCashPosition = async (cash) => {
   }
 
   const moneyPosition = cash.cashInVault + cash.totalCashWithStaff;
-  assertEq(moneyPosition, 770000, "cashInVault + totalCashWithStaff");
+  assertEq(moneyPosition, 300000, "cashInVault + totalCashWithStaff");
   assertEq(
-    cash.totalCollectedFromCustomers - cash.totalCustomerPayout,
-    770000,
-    "totalCollectedFromCustomers - totalCustomerPayout"
+    cash.totalCollectedFromCustomers - cash.totalCustomerSettlement,
+    300000,
+    "totalCollectedFromCustomers - totalCustomerSettlement"
   );
 
   const formula =
@@ -329,7 +296,7 @@ const verifyCashPosition = async (cash) => {
     cash.totalUpiCollectedFromCustomers +
     cash.totalBankCollectedFromCustomers +
     cash.totalCardCollectedFromCustomers -
-    cash.totalCustomerPayout;
+    cash.totalCustomerSettlement;
   assertEq(cash.cashInVault, formula, "cashInVault formula");
 };
 
@@ -374,7 +341,7 @@ const run = async () => {
       admin
     );
     const scheme = await createScheme(
-      { customerId: customer._id.toString(), startDate: new Date("2026-03-01") },
+      { customerId: customer._id.toString(), startDate: new Date("2024-03-01") },
       admin
     );
     customerRecords[c.key] = customer;
@@ -425,23 +392,16 @@ const run = async () => {
     log(`✓ ${agent.name} submitted ${formatINR(agent.submission)} — cash with staff ${formatINR(cash.cashInHand)}`);
   }
 
-  log("\nCreating 4 payouts...\n");
-  for (const p of PAYOUTS) {
-    const customer = customerRecords[p.customerKey];
-    const scheme = schemeRecords[p.customerKey];
-    const payout = await createPayout(
-      {
-        customerId: customer._id.toString(),
-        schemeId: scheme._id.toString(),
-        payoutType: p.payoutType,
-        payoutMethod: p.payoutMethod,
-        amount: p.amount,
-        referenceNumber: p.referenceNumber,
-        notes: "Cash vault demo payout",
-      },
+  log("\nRedeeming 4 schemes (settlement via status)...\n");
+  for (const customerKey of REDEMPTION_CUSTOMER_KEYS) {
+    const customer = customerRecords[customerKey];
+    const scheme = schemeRecords[customerKey];
+    await updateSchemeStatus(
+      scheme._id,
+      { status: "REDEEMED", notes: "Cash vault demo redemption" },
       admin
     );
-    log(`✓ ${customer.name}: ${p.payoutType} ${p.payoutMethod} ${formatINR(p.amount)} (${payout.payoutNumber})`);
+    log(`✓ ${customer.name}: scheme ${scheme.enrollmentNumber} marked REDEEMED`);
   }
 
   log("\n--- Verification ---\n");
@@ -467,14 +427,14 @@ const run = async () => {
 
   const meeraLedger = await getCustomerLedger(customerRecords.meera._id);
   assertEq(meeraLedger.totalPaid, 140000, "Meera customer ledger totalPaid");
-  assertEq(meeraLedger.totalPayout, 50000, "Meera customer ledger totalPayout");
-  assertEq(meeraLedger.netBalance, 90000, "Meera customer ledger netBalance");
+  assertEq(meeraLedger.totalSettled, 140000, "Meera customer ledger totalSettled");
+  assertEq(meeraLedger.netBalance, 0, "Meera customer ledger netBalance");
   log("PASS: customer ledger for Meera");
 
   const sureshLedger = await getSchemeLedger(schemeRecords.suresh._id);
   assertEq(sureshLedger.totalPaid, 160000, "Suresh scheme ledger totalPaid");
-  assertEq(sureshLedger.totalPayout, 30000, "Suresh scheme ledger totalPayout");
-  assertEq(sureshLedger.netBalance, 130000, "Suresh scheme ledger netBalance");
+  assertEq(sureshLedger.totalSettled, 160000, "Suresh scheme ledger totalSettled");
+  assertEq(sureshLedger.netBalance, 0, "Suresh scheme ledger netBalance");
   log("PASS: scheme ledger for Suresh");
 
   log("\n--- Login credentials ---\n");
@@ -497,7 +457,7 @@ const run = async () => {
   log(`Cash Submitted:      ${formatINR(EXPECTED.totalCashSubmittedToVault)}`);
   log(`Cash With Staff:     ${formatINR(EXPECTED.totalCashWithStaff)}`);
   log(`Cash in Vault:       ${formatINR(EXPECTED.cashInVault)}`);
-  log(`Total Payout:        ${formatINR(EXPECTED.totalCustomerPayout)}`);
+  log(`Total Settlement:  ${formatINR(EXPECTED.totalCustomerSettlement)}`);
 
   log("\nCash vault demo seed completed successfully.\n");
   await mongoose.disconnect();

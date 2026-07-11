@@ -4,12 +4,10 @@ const { DEFAULT_STAFF_PERMISSIONS } = require("../constants/staffPermissions");
 const User = require("../models/user.model");
 const StaffProfile = require("../models/staffProfile.model");
 const Scheme = require("../models/scheme.model");
-const CustomerPayout = require("../models/customerPayout.model");
 const {
   USER_ROLES,
   USER_STATUS,
   PAYMENT_STATUS,
-  PAYOUT_STATUS,
   SCHEME_STATUS,
   AUDIT_ACTIONS,
 } = require("../constants/enums");
@@ -298,7 +296,7 @@ const getStaffSummaryBuckets = async (staffUserId) => {
 
 const getStaffDetail = async (
   staffUserId,
-  { from, to, limit, paymentMethod, payoutMethod, payoutType } = {}
+  { from, to, limit, paymentMethod } = {}
 ) => {
   const { user, profile } = await getStaffContextOrThrow(staffUserId);
   const now = new Date();
@@ -321,7 +319,6 @@ const getStaffDetail = async (
     paymentHistory,
     cashSubmissionHistory,
     statusActions,
-    payoutDocs,
   ] = await Promise.all([
     getStaffCashInHand(staffUserId),
     getStaffSummaryBuckets(staffUserId),
@@ -338,29 +335,7 @@ const getStaffDetail = async (
     }),
     getStaffCashSubmissionHistory(staffUserId, { from: rangeFrom, to: rangeTo }),
     getStaffRedeemedClosedHistory(staffUserId),
-    CustomerPayout.find({
-      paidBy: staffUserId,
-      status: PAYOUT_STATUS.SUCCESS,
-      payoutDate: { $gte: rangeFrom, $lte: rangeTo },
-      ...(payoutMethod ? { payoutMethod } : {}),
-      ...(payoutType ? { payoutType } : {}),
-    })
-      .populate("customer", "name passbookNumber phone")
-      .populate("scheme", "enrollmentNumber schemeName")
-      .sort({ payoutDate: -1, createdAt: -1 })
-      .limit(safeLimit)
-      .lean(),
   ]);
-
-  const payoutSummary = payoutDocs.reduce(
-    (acc, p) => {
-      acc.totalAmount += p.amount || 0;
-      acc.count += 1;
-      if (p.payoutType === "REDEMPTION") acc.redeemCount += 1;
-      return acc;
-    },
-    { totalAmount: 0, count: 0, redeemCount: 0 }
-  );
 
   return {
     staff: {
@@ -394,33 +369,8 @@ const getStaffDetail = async (
     paymentMethodBreakdown,
     paymentHistory,
     cashSubmissionHistory,
-    payoutHistory: payoutDocs.map((p) => ({
-      _id: p._id,
-      payoutNumber: p.payoutNumber,
-      payoutType: p.payoutType,
-      payoutMethod: p.payoutMethod,
-      amount: p.amount,
-      payoutDate: p.payoutDate,
-      customer: p.customer
-        ? {
-            _id: p.customer._id,
-            name: p.customer.name,
-            passbookNumber: p.customer.passbookNumber,
-            phone: p.customer.phone,
-          }
-        : null,
-      scheme: p.scheme
-        ? {
-            _id: p.scheme._id,
-            enrollmentNumber: p.scheme.enrollmentNumber,
-            schemeName: p.scheme.schemeName,
-          }
-        : null,
-    })),
-    payoutSummary,
     redeemedByStaff: statusActions.redeemed,
     closedByStaff: statusActions.closed,
-    withdrawnByStaff: statusActions.withdrawn,
   };
 };
 
@@ -468,7 +418,6 @@ const getStaffRedeemedClosedHistory = async (staffUserId) => {
 
   const redeemed = [];
   const closed = [];
-  const withdrawn = [];
 
   schemes.forEach((scheme) => {
     scheme.statusHistory
@@ -496,13 +445,11 @@ const getStaffRedeemedClosedHistory = async (staffUserId) => {
           redeemed.push(item);
         } else if (entry.status === SCHEME_STATUS.CLOSED) {
           closed.push(item);
-        } else if (entry.status === SCHEME_STATUS.WITHDRAWN) {
-          withdrawn.push(item);
         }
       });
   });
 
-  return { redeemed, closed, withdrawn };
+  return { redeemed, closed };
 };
 
 module.exports = {

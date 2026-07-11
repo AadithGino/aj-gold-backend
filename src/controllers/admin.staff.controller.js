@@ -18,7 +18,6 @@ const permissionsSchema = z.object({
   canCollectPayment: z.boolean().optional(),
   canMarkRedeemed: z.boolean().optional(),
   canMarkClosed: z.boolean().optional(),
-  canMarkWithdrawn: z.boolean().optional(),
 });
 
 const createStaffSchema = z.object({
@@ -95,8 +94,6 @@ const getStaffHandler = asyncHandler(async (req, res) => {
     to: req.query.to,
     limit: req.query.limit,
     paymentMethod: req.query.paymentMethod,
-    payoutMethod: req.query.payoutMethod,
-    payoutType: req.query.payoutType,
   });
 
   return res.status(200).json({

@@ -3,6 +3,8 @@ const DEFAULT_STAFF_PERMISSIONS = {
   canCreateCustomer: true,
   canViewReports: false,
   canSubmitCash: true,
+  canMarkRedeemed: true,
+  canMarkClosed: true,
 };
 
 const isLegacyLockedProfile = (permissions = {}) =>

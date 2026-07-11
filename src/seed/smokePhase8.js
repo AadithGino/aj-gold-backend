@@ -1,5 +1,5 @@
 /**
- * Phase 8 smoke test — correction approval + customer payout ledger.
+ * Phase 8 smoke test — correction approval + scheme redemption settlement.
  * Run: npm run smoke:phase8
  */
 const http = require("http");
@@ -13,7 +13,6 @@ const StaffProfile = require("../models/staffProfile.model");
 const Customer = require("../models/customer.model");
 const Payment = require("../models/payment.model");
 const PaymentCorrection = require("../models/paymentCorrection.model");
-const CustomerPayout = require("../models/customerPayout.model");
 const {
   USER_ROLES,
   PAYMENT_METHODS,
@@ -21,11 +20,10 @@ const {
   CORRECTION_TYPES,
   CORRECTION_STATUS,
   SCHEME_STATUS,
-  PAYOUT_TYPES,
 } = require("../constants/enums");
 const { createStaff } = require("../services/staff.service");
 const { createCustomer } = require("../services/customer.service");
-const { createScheme } = require("../services/schemeManagement.service");
+const { createScheme, updateSchemeStatus } = require("../services/schemeManagement.service");
 const { collectPayment } = require("../services/payment.service");
 const { createCashSubmission } = require("../services/cash.service");
 const { getCashPositionSummary } = require("../services/cashPosition.service");
@@ -86,7 +84,6 @@ const assertNoPasswordHash = (value, path = "root", seen = new WeakSet()) => {
 const cleanupP8 = async ({ customerIds = [], staffUserId, staffProfileId, submissionIds = [] }) => {
   if (customerIds.length) {
     await PaymentCorrection.deleteMany({ customer: { $in: customerIds } });
-    await CustomerPayout.deleteMany({ customer: { $in: customerIds } });
     await Payment.deleteMany({ customer: { $in: customerIds } });
     const Scheme = require("../models/scheme.model");
     await Scheme.deleteMany({ customer: { $in: customerIds } });
@@ -280,7 +277,7 @@ const run = async () => {
       assert(reversedUpi.status === PAYMENT_STATUS.REVERSED, "Payment marked REVERSED after approval");
 
       const positionBeforeSubmission = await getCashPositionSummary();
-      assert(positionBeforeSubmission.payoutTrackingImplemented === true, "Payout tracking enabled");
+      assert(positionBeforeSubmission.settlementTrackingImplemented === true, "Settlement tracking enabled");
 
       const { submission } = await createCashSubmission(
         {
@@ -308,39 +305,16 @@ const run = async () => {
         "Cash submission does not change total collected from customers"
       );
 
-      const cashPayoutRes = await requestJson(port, {
-        method: "POST",
-        path: "/api/payouts",
+      const redeemRes = await requestJson(port, {
+        method: "PATCH",
+        path: `/api/schemes/${scheme._id.toString()}/status`,
         token: adminToken,
         body: {
-          customerId: customer._id.toString(),
-          schemeId: scheme._id.toString(),
-          payoutType: PAYOUT_TYPES.REDEMPTION,
-          payoutMethod: PAYMENT_METHODS.CASH,
-          amount: 4000,
-          referenceNumber: `${runTag}-CASH-PAY`,
-          notes: "Smoke cash payout",
+          status: SCHEME_STATUS.REDEEMED,
+          notes: "Smoke redemption settlement",
         },
       });
-      assert(cashPayoutRes.status === 201, "Admin creates CASH payout");
-      assert(cashPayoutRes.body.data.payoutNumber.startsWith("AJGK-PAY-"), "Payout number generated");
-
-      const bankPayoutRes = await requestJson(port, {
-        method: "POST",
-        path: "/api/payouts",
-        token: adminToken,
-        body: {
-          customerId: customer._id.toString(),
-          schemeId: scheme._id.toString(),
-          payoutType: PAYOUT_TYPES.WITHDRAWAL,
-          payoutMethod: PAYMENT_METHODS.BANK,
-          amount: 2000,
-          referenceNumber: `${runTag}-BANK-PAY`,
-          applySchemeStatus: SCHEME_STATUS.REDEEMED,
-          notes: "Smoke bank payout with redeem",
-        },
-      });
-      assert(bankPayoutRes.status === 201, "Admin creates BANK payout with REDEEMED status");
+      assert(redeemRes.status === 200, "Admin redeems scheme after maturity");
 
       const Scheme = require("../models/scheme.model");
       const schemeAfter = await Scheme.findById(scheme._id);
@@ -348,9 +322,9 @@ const run = async () => {
       assert(schemeAfter.statusHistory.some((h) => h.status === SCHEME_STATUS.REDEEMED), "statusHistory recorded");
 
       const cashPosition = await getCashPositionSummary();
-      assert(cashPosition.totalCustomerPayout === 6000, "Total customer payout is 6000");
-      assert(cashPosition.totalCashCustomerPayout === 4000, "Cash customer payout is 4000");
-      assert(cashPosition.totalBankCustomerPayout === 2000, "Bank customer payout is 2000");
+      assert(cashPosition.totalCustomerSettlement === 18000, "Total customer settlement is 18000");
+      assert(cashPosition.totalCashCustomerSettlement === 15000, "Cash customer settlement is 15000");
+      assert(cashPosition.totalBankCustomerSettlement === 3000, "Bank customer settlement is 3000");
       assert(cashPosition.totalCashInVault === cashPosition.cashInVault, "totalCashInVault equals cashInVault");
       assert(
         cashPosition.cashInVault ===
@@ -358,19 +332,19 @@ const run = async () => {
             cashPosition.totalUpiCollectedFromCustomers +
             cashPosition.totalBankCollectedFromCustomers +
             cashPosition.totalCardCollectedFromCustomers -
-            cashPosition.totalCustomerPayout,
-        "Cash in Vault = submitted cash + UPI + Bank + Card collections - all payouts"
+            cashPosition.totalCustomerSettlement,
+        "Cash in Vault = submitted cash + UPI + Bank + Card collections - all settlements"
       );
       assert(
-        cashPosition.cashInVault === positionAfterSubmission.cashInVault - 6000,
-        "All customer payouts reduce Cash in Vault"
+        cashPosition.cashInVault === positionAfterSubmission.cashInVault - 18000,
+        "Scheme settlement reduces Cash in Vault by settled scheme value"
       );
 
       const customerLedger = await getCustomerLedger(customer._id);
-      assert((customerLedger.payoutHistory || []).length >= 1, "Customer ledger includes payouts");
+      assert((customerLedger.settlementHistory || []).length >= 1, "Customer ledger includes settlements");
 
       const schemeLedger = await getSchemeLedger(scheme._id);
-      assert((schemeLedger.successfulPayouts || []).length >= 1, "Scheme ledger includes payouts");
+      assert((schemeLedger.settlements || []).length >= 1, "Scheme ledger includes settlements");
 
       const staffApproveBlock = await requestJson(port, {
         method: "POST",
@@ -380,19 +354,16 @@ const run = async () => {
       });
       assert(staffApproveBlock.status === 403, "Staff cannot approve corrections");
 
-      const staffPayoutBlock = await requestJson(port, {
-        method: "POST",
-        path: "/api/payouts",
+      const staffRedeemRes = await requestJson(port, {
+        method: "PATCH",
+        path: `/api/schemes/${scheme._id.toString()}/status`,
         token: staffToken,
         body: {
-          customerId: customer._id.toString(),
-          schemeId: scheme._id.toString(),
-          payoutType: PAYOUT_TYPES.ADJUSTMENT,
-          payoutMethod: PAYMENT_METHODS.CASH,
-          amount: 100,
+          status: SCHEME_STATUS.REDEEMED,
+          notes: "Staff cannot re-redeem",
         },
       });
-      assert(staffPayoutBlock.status === 403, "Staff cannot create payouts");
+      assert(staffRedeemRes.status === 400, "Staff cannot re-redeem settled scheme");
 
       const customerCorrectionBlock = await requestJson(port, {
         method: "GET",
@@ -401,12 +372,16 @@ const run = async () => {
       });
       assert(customerCorrectionBlock.status === 403, "Customer blocked from corrections");
 
-      const customerPayoutBlock = await requestJson(port, {
-        method: "GET",
-        path: "/api/payouts",
+      const customerSchemeBlock = await requestJson(port, {
+        method: "PATCH",
+        path: `/api/schemes/${scheme._id.toString()}/status`,
         token: customerToken,
+        body: {
+          status: SCHEME_STATUS.REDEEMED,
+          notes: "Customer blocked",
+        },
       });
-      assert(customerPayoutBlock.status === 403, "Customer blocked from payout admin routes");
+      assert(customerSchemeBlock.status === 403, "Customer blocked from scheme status updates");
 
       const correctionsList = await requestJson(port, {
         method: "GET",

@@ -34,12 +34,12 @@ const sumSettlementByMethod = async (method) => {
   return rows[0]?.total || 0;
 };
 
-const getPayoutTotals = async () => {
+const getSettlementTotals = async () => {
   const [
-    totalCashCustomerPayout,
-    totalUpiCustomerPayout,
-    totalBankCustomerPayout,
-    totalCardCustomerPayout,
+    totalCashCustomerSettlement,
+    totalUpiCustomerSettlement,
+    totalBankCustomerSettlement,
+    totalCardCustomerSettlement,
   ] = await Promise.all([
     sumSettlementByMethod(PAYMENT_METHODS.CASH),
     sumSettlementByMethod(PAYMENT_METHODS.UPI),
@@ -47,18 +47,18 @@ const getPayoutTotals = async () => {
     sumSettlementByMethod(PAYMENT_METHODS.CARD),
   ]);
 
-  const totalCustomerPayout =
-    totalCashCustomerPayout +
-    totalUpiCustomerPayout +
-    totalBankCustomerPayout +
-    totalCardCustomerPayout;
+  const totalCustomerSettlement =
+    totalCashCustomerSettlement +
+    totalUpiCustomerSettlement +
+    totalBankCustomerSettlement +
+    totalCardCustomerSettlement;
 
   return {
-    totalCustomerPayout,
-    totalCashCustomerPayout,
-    totalUpiCustomerPayout,
-    totalBankCustomerPayout,
-    totalCardCustomerPayout,
+    totalCustomerSettlement,
+    totalCashCustomerSettlement,
+    totalUpiCustomerSettlement,
+    totalBankCustomerSettlement,
+    totalCardCustomerSettlement,
   };
 };
 
@@ -69,7 +69,7 @@ const buildCashPositionPayload = ({
   totalBankCollectedFromCustomers,
   totalCardCollectedFromCustomers,
   totalCashWithStaff,
-  payoutTotals,
+  settlementTotals,
 }) => {
   const totalCollectedFromCustomers =
     totalCashCollectedFromCustomers +
@@ -82,7 +82,7 @@ const buildCashPositionPayload = ({
     totalUpiCollectedFromCustomers +
     totalBankCollectedFromCustomers +
     totalCardCollectedFromCustomers -
-    payoutTotals.totalCustomerPayout;
+    settlementTotals.totalCustomerSettlement;
 
   return {
     cashInVault,
@@ -95,17 +95,17 @@ const buildCashPositionPayload = ({
     totalCardCollectedFromCustomers,
     totalCashWithStaff,
     totalCashSubmittedToVault,
-    totalCustomerPayout: payoutTotals.totalCustomerPayout,
-    totalCashCustomerPayout: payoutTotals.totalCashCustomerPayout,
-    totalUpiCustomerPayout: payoutTotals.totalUpiCustomerPayout,
-    totalBankCustomerPayout: payoutTotals.totalBankCustomerPayout,
-    totalCardCustomerPayout: payoutTotals.totalCardCustomerPayout,
-    payoutTrackingImplemented: true,
+    totalCustomerSettlement: settlementTotals.totalCustomerSettlement,
+    totalCashCustomerSettlement: settlementTotals.totalCashCustomerSettlement,
+    totalUpiCustomerSettlement: settlementTotals.totalUpiCustomerSettlement,
+    totalBankCustomerSettlement: settlementTotals.totalBankCustomerSettlement,
+    totalCardCustomerSettlement: settlementTotals.totalCardCustomerSettlement,
+    settlementTrackingImplemented: true,
     cashPosition: {
       cashInVault,
       totalCashWithStaff,
       totalCashSubmittedToVault,
-      totalCustomerPayout: payoutTotals.totalCustomerPayout,
+      totalCustomerSettlement: settlementTotals.totalCustomerSettlement,
     },
     collectionBreakdown: {
       totalCashCollectedFromCustomers,
@@ -114,24 +114,24 @@ const buildCashPositionPayload = ({
       totalCardCollectedFromCustomers,
       totalCollectedFromCustomers,
     },
-    payoutBreakdown: {
-      totalCashCustomerPayout: payoutTotals.totalCashCustomerPayout,
-      totalUpiCustomerPayout: payoutTotals.totalUpiCustomerPayout,
-      totalBankCustomerPayout: payoutTotals.totalBankCustomerPayout,
-      totalCardCustomerPayout: payoutTotals.totalCardCustomerPayout,
-      totalCustomerPayout: payoutTotals.totalCustomerPayout,
+    settlementBreakdown: {
+      totalCashCustomerSettlement: settlementTotals.totalCashCustomerSettlement,
+      totalUpiCustomerSettlement: settlementTotals.totalUpiCustomerSettlement,
+      totalBankCustomerSettlement: settlementTotals.totalBankCustomerSettlement,
+      totalCardCustomerSettlement: settlementTotals.totalCardCustomerSettlement,
+      totalCustomerSettlement: settlementTotals.totalCustomerSettlement,
     },
   };
 };
 
 const getCashPositionSummary = async () => {
-  const [allTimeBreakdown, totalCashSubmitted, payoutTotals, staffUsers] =
+  const [allTimeBreakdown, totalCashSubmitted, settlementTotals, staffUsers] =
     await Promise.all([
       getPaymentMethodBreakdown({ status: PAYMENT_STATUS.SUCCESS }),
       CashSubmission.aggregate([
         { $group: { _id: null, total: { $sum: "$submittedAmount" } } },
       ]),
-      getPayoutTotals(),
+      getSettlementTotals(),
       User.find({ role: USER_ROLES.STAFF, status: "ACTIVE" }).select("_id").lean(),
     ]);
 
@@ -156,12 +156,12 @@ const getCashPositionSummary = async () => {
     totalBankCollectedFromCustomers,
     totalCardCollectedFromCustomers,
     totalCashWithStaff,
-    payoutTotals,
+    settlementTotals,
   });
 };
 
 module.exports = {
   getCashPositionSummary,
-  getPayoutTotals,
+  getSettlementTotals,
   buildCashPositionPayload,
 };

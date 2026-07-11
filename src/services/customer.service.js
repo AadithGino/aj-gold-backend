@@ -108,7 +108,6 @@ const enrichScheme = async (scheme) => {
   const statusHistory = mapStatusHistory(scheme.statusHistory || []);
   const redeemedEvent = getLatestStatusEvent(statusHistory, SCHEME_STATUS.REDEEMED);
   const closedEvent = getLatestStatusEvent(statusHistory, SCHEME_STATUS.CLOSED);
-  const withdrawnEvent = getLatestStatusEvent(statusHistory, SCHEME_STATUS.WITHDRAWN);
 
   return {
     _id: scheme._id,
@@ -126,8 +125,6 @@ const enrichScheme = async (scheme) => {
     redeemedAt: redeemedEvent?.changedAt || null,
     closedBy: closedEvent?.changedBy || null,
     closedAt: closedEvent?.changedAt || null,
-    withdrawnBy: withdrawnEvent?.changedBy || null,
-    withdrawnAt: withdrawnEvent?.changedAt || null,
     totalPaid: limitSummary.totalPaid,
     firstSixMonthsPaid: limitSummary.firstSixMonthsPaid,
     afterSixMonthsPaid: limitSummary.afterSixMonthsPaid,
@@ -140,14 +137,11 @@ const enrichScheme = async (scheme) => {
 
 const groupSchemes = (schemes) => {
   const active = schemes.find((scheme) => scheme.status === SCHEME_STATUS.ACTIVE) || null;
-  const matured = schemes.filter((scheme) => scheme.status === SCHEME_STATUS.MATURED);
   const redeemed = schemes.filter((scheme) => scheme.status === SCHEME_STATUS.REDEEMED);
   const closed = schemes.filter((scheme) => scheme.status === SCHEME_STATUS.CLOSED);
-  const withdrawn = schemes.filter((scheme) => scheme.status === SCHEME_STATUS.WITHDRAWN);
-  const suspended = schemes.filter((scheme) => scheme.status === SCHEME_STATUS.SUSPENDED);
   const previous = schemes.filter((scheme) => scheme.status !== SCHEME_STATUS.ACTIVE);
 
-  return { active, matured, redeemed, closed, withdrawn, suspended, previous, all: schemes };
+  return { active, redeemed, closed, previous, all: schemes };
 };
 
 const createCustomer = async (payload, actor) => {

@@ -10,17 +10,32 @@ const {
   PAYMENT_METHODS,
   PAYMENT_STATUS,
   SCHEME_STATUS,
+  SETTLEMENT_STATUSES,
 } = require("../constants/enums");
 const ApiError = require("../utils/ApiError");
 const { parseDateRange, startOfDay, endOfDay } = require("../utils/date");
 const dayjs = require("dayjs");
 const { getStaffCashInHand, getPaymentMethodBreakdown } = require("./cash.service");
 const { getCashPositionSummary } = require("./cashPosition.service");
-const { mapPayout } = require("./payout.service");
-const CustomerPayout = require("../models/customerPayout.model");
-const { PAYOUT_STATUS } = require("../constants/enums");
 const { enrichScheme, getCustomerDetail, getCustomerOrThrow } = require("./customer.service");
 const { getSchemeLimitSummary } = require("./paymentLimit.service");
+
+const mapSettlementEntry = (scheme, event, index = 0) => ({
+  _id: `${scheme._id}-${event.status}-${event.changedAt || index}`,
+  settlementRef: `SETTLE-${scheme.enrollmentNumber}-${index + 1}`,
+  settlementType: event.status === SCHEME_STATUS.CLOSED ? "CLOSURE" : "REDEMPTION",
+  amount: scheme.totalPaid || 0,
+  settledAt: event.changedAt || scheme.updatedAt || scheme.createdAt,
+  notes: event.notes || "",
+  status: event.status,
+  settledBy: event.changedBy || null,
+  scheme: {
+    _id: scheme._id,
+    enrollmentNumber: scheme.enrollmentNumber,
+    schemeName: scheme.schemeName,
+    status: scheme.status,
+  },
+});
 
 const toObjectId = (id, label = "id") => {
   if (!id) return null;
@@ -281,7 +296,7 @@ const getMaturityCalendar = async (filters = {}) => {
 
   const pendingQuery = {
     maturityDate: { $lte: endOfDay(new Date()) },
-    status: { $nin: [SCHEME_STATUS.REDEEMED, SCHEME_STATUS.CLOSED, SCHEME_STATUS.WITHDRAWN] },
+    status: { $nin: [SCHEME_STATUS.REDEEMED, SCHEME_STATUS.CLOSED] },
   };
 
   const [schemes, pendingSchemes] = await Promise.all([
@@ -354,12 +369,15 @@ const getCustomerLedger = async (customerId) => {
   const successPayments = allPayments.filter((p) => p.status === PAYMENT_STATUS.SUCCESS);
   const reversedPayments = allPayments.filter((p) => p.status === PAYMENT_STATUS.REVERSED);
 
-  const payoutDocs = await CustomerPayout.find({ customer: customerId })
-    .populate("scheme", "enrollmentNumber status")
-    .sort({ payoutDate: -1 })
-    .lean();
-  const successPayouts = payoutDocs.filter((p) => p.status === PAYOUT_STATUS.SUCCESS);
-  const reversedPayouts = payoutDocs.filter((p) => p.status === PAYOUT_STATUS.REVERSED);
+  const settlementByScheme = new Map(
+    detail.schemes.map((scheme) => [
+      String(scheme._id),
+      (scheme.statusHistory || [])
+        .filter((event) => SETTLEMENT_STATUSES.includes(event.status))
+        .map((event, index) => mapSettlementEntry(scheme, event, index)),
+    ])
+  );
+  const settlements = Array.from(settlementByScheme.values()).flat();
 
   const paymentsByScheme = detail.schemes.map((scheme) => ({
     schemeId: scheme._id,
@@ -372,15 +390,10 @@ const getCustomerLedger = async (customerId) => {
     reversedPayments: reversedPayments
       .filter((p) => String(p.scheme?._id || p.scheme) === String(scheme._id))
       .map(mapCollectionPayment),
-    payouts: successPayouts
-      .filter((p) => String(p.scheme?._id || p.scheme) === String(scheme._id))
-      .map(mapPayout),
-    reversedPayouts: reversedPayouts
-      .filter((p) => String(p.scheme?._id || p.scheme) === String(scheme._id))
-      .map(mapPayout),
+    settlements: settlementByScheme.get(String(scheme._id)) || [],
   }));
 
-  const totalPayout = successPayouts.reduce((sum, p) => sum + (p.amount || 0), 0);
+  const totalSettled = settlements.reduce((sum, entry) => sum + (entry.amount || 0), 0);
   const totalPaidAllSchemes = detail.schemes.reduce((sum, s) => sum + (s.totalPaid || 0), 0);
 
   return {
@@ -389,8 +402,8 @@ const getCustomerLedger = async (customerId) => {
     nominee: detail.nominee,
     schemes: detail.schemes,
     totalPaid: totalPaidAllSchemes,
-    totalPayout,
-    netBalance: totalPaidAllSchemes - totalPayout,
+    totalSettled,
+    netBalance: totalPaidAllSchemes - totalSettled,
     paymentsByScheme,
     receipts: successPayments.map((p) => ({
       receiptNumber: p.receiptNumber,
@@ -399,8 +412,7 @@ const getCustomerLedger = async (customerId) => {
       enrollmentNumber: p.scheme?.enrollmentNumber,
     })),
     paymentHistory: detail.paymentHistory,
-    payoutHistory: successPayouts.map(mapPayout),
-    reversedPayoutHistory: reversedPayouts.map(mapPayout),
+    settlementHistory: settlements,
     statusHistory: detail.schemes.flatMap((s) =>
       (s.statusHistory || []).map((h) => ({ schemeId: s._id, enrollmentNumber: s.enrollmentNumber, ...h }))
     ),
@@ -427,17 +439,11 @@ const getSchemeLedger = async (schemeId) => {
     .filter((p) => p.status === PAYMENT_STATUS.REVERSED)
     .map(mapCollectionPayment);
 
-  const payoutDocs = await CustomerPayout.find({ scheme: schemeId })
-    .populate("paidBy", "name role")
-    .sort({ payoutDate: -1 })
-    .lean();
-  const successfulPayouts = payoutDocs
-    .filter((p) => p.status === PAYOUT_STATUS.SUCCESS)
-    .map(mapPayout);
-  const reversedPayouts = payoutDocs
-    .filter((p) => p.status === PAYOUT_STATUS.REVERSED)
-    .map(mapPayout);
-  const totalPayout = successfulPayouts.reduce((sum, p) => sum + (p.amount || 0), 0);
+  const settlements = (scheme.statusHistory || [])
+    .filter((event) => SETTLEMENT_STATUSES.includes(event.status))
+    .map((event, index) => mapSettlementEntry(scheme, event, index))
+    .sort((a, b) => new Date(b.settledAt) - new Date(a.settledAt));
+  const totalSettled = settlements.reduce((sum, entry) => sum + (entry.amount || 0), 0);
 
   return {
     scheme: {
@@ -464,16 +470,15 @@ const getSchemeLedger = async (schemeId) => {
     },
     successfulPayments,
     reversedPayments,
-    successfulPayouts,
-    reversedPayouts,
+    settlements,
     receipts: successfulPayments.map((p) => ({
       receiptNumber: p.receiptNumber,
       amount: p.amount,
       paymentDate: p.paymentDate,
     })),
     totalPaid: scheme.totalPaid,
-    totalPayout,
-    netBalance: scheme.totalPaid - totalPayout,
+    totalSettled,
+    netBalance: scheme.totalPaid - totalSettled,
   };
 };
 

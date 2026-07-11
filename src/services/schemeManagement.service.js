@@ -24,7 +24,6 @@ const STATUS_NOTES_REQUIRED = [
 const auditActionForStatus = {
   [SCHEME_STATUS.REDEEMED]: AUDIT_ACTIONS.SCHEME_REDEEMED,
   [SCHEME_STATUS.CLOSED]: AUDIT_ACTIONS.SCHEME_CLOSED,
-  [SCHEME_STATUS.WITHDRAWN]: AUDIT_ACTIONS.SCHEME_WITHDRAWN,
 };
 
 const getSchemeOrThrow = async (schemeId) => {
@@ -51,10 +50,6 @@ const assertStaffSchemePermission = async (actor, status) => {
 
   if (status === SCHEME_STATUS.CLOSED && !profile.permissions.canMarkClosed) {
     throw new ApiError(403, "Staff cannot mark scheme as closed.");
-  }
-
-  if (status === SCHEME_STATUS.WITHDRAWN && !profile.permissions.canMarkWithdrawn) {
-    throw new ApiError(403, "Staff cannot mark scheme as withdrawn.");
   }
 };
 
@@ -111,6 +106,10 @@ const updateSchemeStatus = async (schemeId, { status, notes }, actor) => {
       400,
       "Only REDEEMED (after maturity) or CLOSED (before maturity) are allowed."
     );
+  }
+
+  if ([SCHEME_STATUS.REDEEMED, SCHEME_STATUS.CLOSED].includes(scheme.status)) {
+    throw new ApiError(400, "Scheme is already settled.");
   }
 
   if (status === SCHEME_STATUS.REDEEMED && new Date() < new Date(scheme.maturityDate)) {
