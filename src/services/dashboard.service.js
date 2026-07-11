@@ -83,12 +83,19 @@ const getAdminDashboard = async () => {
 
   const [
     activeSchemes,
+    pendingRedemptions,
     todayBreakdown,
     recentPayments,
     staffUsers,
     topStaffRows,
   ] = await Promise.all([
     Scheme.countDocuments({ status: SCHEME_STATUS.ACTIVE }),
+    Scheme.countDocuments({
+      maturityDate: { $lte: todayEnd },
+      status: {
+        $nin: [SCHEME_STATUS.REDEEMED, SCHEME_STATUS.CLOSED, SCHEME_STATUS.WITHDRAWN],
+      },
+    }),
     getPaymentMethodBreakdown({ paymentDate: { $gte: todayStart, $lte: todayEnd } }),
     Payment.find({ status: PAYMENT_STATUS.SUCCESS })
       .sort({ paymentDate: -1 })
@@ -149,7 +156,7 @@ const getAdminDashboard = async () => {
     .filter(Boolean);
 
   return {
-    counts: { activeSchemes },
+    counts: { activeSchemes, pendingRedemptions },
     today,
     ...cashPosition,
     pendingCashSubmissionSummary: {

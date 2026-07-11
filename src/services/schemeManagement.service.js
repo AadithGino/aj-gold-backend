@@ -19,7 +19,6 @@ const { getCustomerOrThrow } = require("./customer.service");
 const STATUS_NOTES_REQUIRED = [
   SCHEME_STATUS.REDEEMED,
   SCHEME_STATUS.CLOSED,
-  SCHEME_STATUS.WITHDRAWN,
 ];
 
 const auditActionForStatus = {
@@ -107,12 +106,19 @@ const createScheme = async ({ customerId, schemeName, startDate }, actor) => {
 const updateSchemeStatus = async (schemeId, { status, notes }, actor) => {
   const scheme = await getSchemeOrThrow(schemeId);
 
-  if (status === SCHEME_STATUS.MATURED || status === SCHEME_STATUS.SUSPENDED) {
-    throw new ApiError(400, "Use REDEEMED (after maturity) or CLOSED for settlement.");
+  if (![SCHEME_STATUS.REDEEMED, SCHEME_STATUS.CLOSED].includes(status)) {
+    throw new ApiError(
+      400,
+      "Only REDEEMED (after maturity) or CLOSED (before maturity) are allowed."
+    );
   }
 
   if (status === SCHEME_STATUS.REDEEMED && new Date() < new Date(scheme.maturityDate)) {
     throw new ApiError(400, "Scheme can be redeemed only after maturity date.");
+  }
+
+  if (status === SCHEME_STATUS.CLOSED && new Date() >= new Date(scheme.maturityDate)) {
+    throw new ApiError(400, "After maturity date use REDEEMED status.");
   }
 
   if (STATUS_NOTES_REQUIRED.includes(status) && !notes?.trim()) {
