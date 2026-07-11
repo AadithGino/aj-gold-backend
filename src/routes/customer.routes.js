@@ -13,7 +13,6 @@ const {
   resetCustomerPasswordHandler,
   getCustomerSchemesHandler,
 } = require("../controllers/customer.controller");
-const { customerPayoutsHandler } = require("../controllers/payout.controller");
 
 const router = express.Router();
 
@@ -21,7 +20,6 @@ router.use(authMiddleware);
 router.use(adminOrStaffMiddleware);
 
 router.get("/", listCustomersHandler);
-router.get("/:customerId/payouts", customerPayoutsHandler);
 router.get("/:customerId/schemes", getCustomerSchemesHandler);
 router.get("/:customerId", getCustomerHandler);
 

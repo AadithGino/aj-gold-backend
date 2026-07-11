@@ -107,6 +107,14 @@ const createScheme = async ({ customerId, schemeName, startDate }, actor) => {
 const updateSchemeStatus = async (schemeId, { status, notes }, actor) => {
   const scheme = await getSchemeOrThrow(schemeId);
 
+  if (status === SCHEME_STATUS.MATURED || status === SCHEME_STATUS.SUSPENDED) {
+    throw new ApiError(400, "Use REDEEMED (after maturity) or CLOSED for settlement.");
+  }
+
+  if (status === SCHEME_STATUS.REDEEMED && new Date() < new Date(scheme.maturityDate)) {
+    throw new ApiError(400, "Scheme can be redeemed only after maturity date.");
+  }
+
   if (STATUS_NOTES_REQUIRED.includes(status) && !notes?.trim()) {
     throw new ApiError(400, "Notes are required for this status change.");
   }

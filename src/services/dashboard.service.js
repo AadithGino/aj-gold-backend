@@ -180,7 +180,7 @@ const getStaffDashboard = async (user) => {
     recentPayments,
     hourlyRows,
     recentCashSubmissions,
-    recentPayouts,
+    recentRedemptionSchemes,
   ] =
     await Promise.all([
       StaffProfile.findOne({ user: user._id }).lean(),
@@ -224,14 +224,13 @@ const getStaffDashboard = async (user) => {
         .sort({ submissionDate: -1, createdAt: -1 })
         .limit(5)
         .lean(),
-      CustomerPayout.find({
-        paidBy: user._id,
-        status: PAYOUT_STATUS.SUCCESS,
+      Scheme.find({
+        status: SCHEME_STATUS.REDEEMED,
+        "statusHistory.changedBy": user._id,
       })
-        .sort({ payoutDate: -1, createdAt: -1 })
-        .limit(5)
         .populate("customer", "name passbookNumber phone")
-        .populate("scheme", "enrollmentNumber schemeName status")
+        .limit(5)
+        .sort({ updatedAt: -1 })
         .lean(),
     ]);
 
@@ -296,30 +295,35 @@ const getStaffDashboard = async (user) => {
       notes: row.notes || "",
       createdAt: row.createdAt,
     })),
-    recentPayouts: recentPayouts.map((p) => ({
-      _id: p._id,
-      payoutNumber: p.payoutNumber,
-      payoutType: p.payoutType,
-      payoutMethod: p.payoutMethod,
-      amount: p.amount,
-      payoutDate: p.payoutDate,
-      customer: p.customer
-        ? {
-            _id: p.customer._id,
-            name: p.customer.name,
-            passbookNumber: p.customer.passbookNumber,
-            phone: p.customer.phone,
-          }
-        : null,
-      scheme: p.scheme
-        ? {
-            _id: p.scheme._id,
-            enrollmentNumber: p.scheme.enrollmentNumber,
-            schemeName: p.scheme.schemeName,
-            status: p.scheme.status,
-          }
-        : null,
-    })),
+    recentRedemptions: recentRedemptionSchemes
+      .map((scheme) => {
+        const redemptionEntry = (scheme.statusHistory || [])
+          .filter(
+            (entry) =>
+              String(entry.changedBy) === String(user._id) &&
+              entry.status === SCHEME_STATUS.REDEEMED
+          )
+          .sort((a, b) => new Date(b.changedAt) - new Date(a.changedAt))[0];
+        if (!redemptionEntry) return null;
+        return {
+          _id: `${scheme._id}-${redemptionEntry.changedAt}`,
+          schemeId: scheme._id,
+          enrollmentNumber: scheme.enrollmentNumber,
+          schemeName: scheme.schemeName,
+          customer: scheme.customer
+            ? {
+                _id: scheme.customer._id,
+                name: scheme.customer.name,
+                passbookNumber: scheme.customer.passbookNumber,
+                phone: scheme.customer.phone,
+              }
+            : null,
+          status: redemptionEntry.status,
+          changedAt: redemptionEntry.changedAt,
+          notes: redemptionEntry.notes || "",
+        };
+      })
+      .filter(Boolean),
     lastSyncedAt: now,
   };
 };
@@ -640,12 +644,75 @@ const getCustomerPayoutHistory = async (user, { from, to, method, payoutType } =
   };
 };
 
+const getStaffRedemptionHistory = async (user, { from, to } = {}) => {
+  if (![USER_ROLES.ADMIN, USER_ROLES.STAFF].includes(user.role)) {
+    throw new ApiError(403, "Staff/Admin only.");
+  }
+  const customRange = parseDateRange(from, to);
+  if (customRange.error) {
+    throw new ApiError(400, customRange.error);
+  }
+
+  const schemes = await Scheme.find({
+    "statusHistory.changedBy": user._id,
+    "statusHistory.status": SCHEME_STATUS.REDEEMED,
+  })
+    .populate("customer", "name passbookNumber phone")
+    .sort({ updatedAt: -1 })
+    .lean();
+
+  const items = schemes
+    .flatMap((scheme) =>
+      (scheme.statusHistory || [])
+        .filter(
+          (entry) =>
+            String(entry.changedBy) === String(user._id) &&
+            entry.status === SCHEME_STATUS.REDEEMED
+        )
+        .map((entry) => ({
+          _id: `${scheme._id}-${entry.changedAt}`,
+          schemeId: scheme._id,
+          enrollmentNumber: scheme.enrollmentNumber,
+          schemeName: scheme.schemeName,
+          customer: scheme.customer
+            ? {
+                _id: scheme.customer._id,
+                name: scheme.customer.name,
+                passbookNumber: scheme.customer.passbookNumber,
+                phone: scheme.customer.phone,
+              }
+            : null,
+          status: entry.status,
+          changedAt: entry.changedAt,
+          notes: entry.notes || "",
+        }))
+    )
+    .filter((entry) => {
+      const changedAt = new Date(entry.changedAt).getTime();
+      if (Number.isNaN(changedAt)) return false;
+      if (customRange.from && changedAt < customRange.from.getTime()) return false;
+      if (customRange.to && changedAt > customRange.to.getTime()) return false;
+      return true;
+    })
+    .sort((a, b) => new Date(b.changedAt) - new Date(a.changedAt));
+
+  return {
+    range: {
+      from: customRange.from || null,
+      to: customRange.to || null,
+    },
+    summary: {
+      count: items.length,
+    },
+    items,
+  };
+};
+
 module.exports = {
   getAdminDashboard,
   getStaffDashboard,
   getCustomerDashboard,
   getRoleProfile,
   getStaffCashSubmissions,
-  getStaffPayoutHistory,
-  getCustomerPayoutHistory,
+  getStaffRedemptionHistory,
 };

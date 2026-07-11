@@ -1,20 +1,34 @@
 const User = require("../models/user.model");
 const CashSubmission = require("../models/cashSubmission.model");
-const CustomerPayout = require("../models/customerPayout.model");
+const Payment = require("../models/payment.model");
 const {
   USER_ROLES,
   PAYMENT_METHODS,
   PAYMENT_STATUS,
-  PAYOUT_STATUS,
+  SCHEME_STATUS,
 } = require("../constants/enums");
 const { getStaffCashInHand, getPaymentMethodBreakdown } = require("./cash.service");
 
 const sumMethod = (rows, method) =>
   rows.find((row) => row.paymentMethod === method)?.total || 0;
 
-const sumPayoutByMethod = async (method) => {
-  const rows = await CustomerPayout.aggregate([
-    { $match: { status: PAYOUT_STATUS.SUCCESS, payoutMethod: method } },
+const sumSettlementByMethod = async (method) => {
+  const rows = await Payment.aggregate([
+    { $match: { status: PAYMENT_STATUS.SUCCESS, paymentMethod: method } },
+    {
+      $lookup: {
+        from: "schemes",
+        localField: "scheme",
+        foreignField: "_id",
+        as: "schemeDoc",
+      },
+    },
+    { $unwind: "$schemeDoc" },
+    {
+      $match: {
+        "schemeDoc.status": { $in: [SCHEME_STATUS.REDEEMED, SCHEME_STATUS.CLOSED] },
+      },
+    },
     { $group: { _id: null, total: { $sum: "$amount" } } },
   ]);
   return rows[0]?.total || 0;
@@ -27,10 +41,10 @@ const getPayoutTotals = async () => {
     totalBankCustomerPayout,
     totalCardCustomerPayout,
   ] = await Promise.all([
-    sumPayoutByMethod(PAYMENT_METHODS.CASH),
-    sumPayoutByMethod(PAYMENT_METHODS.UPI),
-    sumPayoutByMethod(PAYMENT_METHODS.BANK),
-    sumPayoutByMethod(PAYMENT_METHODS.CARD),
+    sumSettlementByMethod(PAYMENT_METHODS.CASH),
+    sumSettlementByMethod(PAYMENT_METHODS.UPI),
+    sumSettlementByMethod(PAYMENT_METHODS.BANK),
+    sumSettlementByMethod(PAYMENT_METHODS.CARD),
   ]);
 
   const totalCustomerPayout =

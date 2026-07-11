@@ -242,6 +242,7 @@ const getSchemeReport = async (filters = {}) => {
       const customer = customerMap.get(String(scheme.customer));
       return {
         schemeId: scheme._id,
+        customerId: customer?._id || scheme.customer,
         customerName: customer?.name || "—",
         phone: customer?.phone || "—",
         passbookNumber: customer?.passbookNumber || "—",
