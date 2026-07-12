@@ -695,6 +695,18 @@ describe("financial hardening", () => {
     assert.notEqual(decoded.tokenVersion ?? 0, user.tokenVersion);
   });
 
+  it("21b. login embeds the current tokenVersion after logout", async () => {
+    const admin = await createAdmin();
+    admin.passwordHash = await bcrypt.hash("adminpass1", 10);
+    await admin.save();
+    await logout(admin);
+    const userAfterLogout = await User.findById(admin._id);
+    const { token } = await login({ phone: admin.phone, password: "adminpass1" });
+    const decoded = jwt.verify(token, JWT_SECRET);
+    assert.equal(decoded.tokenVersion, userAfterLogout.tokenVersion);
+    assert.equal(decoded.tokenVersion, 1);
+  });
+
   it("22. missing clientRequestId returns validation error", async () => {
     const admin = await createAdmin();
     const staff = await createStaff();

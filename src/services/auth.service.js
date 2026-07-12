@@ -24,7 +24,7 @@ const login = async ({ phone, password }) => {
   }
 
   const user = await User.findOne({ phone: phone.trim() }).select(
-    "name phone role status +passwordHash +tokenVersion"
+    "name phone role status tokenVersion +passwordHash"
   );
   if (!user) throw new ApiError(401, "Invalid phone or password.");
   if (user.status === "INACTIVE") throw new ApiError(403, "Account is inactive.");
@@ -35,11 +35,12 @@ const login = async ({ phone, password }) => {
   const match = await bcrypt.compare(password, user.passwordHash);
   if (!match) throw new ApiError(401, "Invalid phone or password.");
 
-  user.lastLoginAt = new Date();
-  await user.save();
+  const tokenVersion = user.tokenVersion || 0;
+
+  await User.updateOne({ _id: user._id }, { $set: { lastLoginAt: new Date() } });
 
   const token = jwt.sign(
-    { id: user._id, role: user.role, tokenVersion: user.tokenVersion || 0 },
+    { id: user._id, role: user.role, tokenVersion },
     JWT_SECRET,
     { expiresIn: JWT_EXPIRES_IN }
   );
