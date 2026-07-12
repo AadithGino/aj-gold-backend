@@ -23,6 +23,21 @@ const parseBody = (schema, body) => {
 
 const collectPaymentHandler = asyncHandler(async (req, res) => {
   const payload = parseBody(collectPaymentSchema, req.body);
+  if (process.env.NODE_ENV !== "test") {
+    console.info(
+      JSON.stringify({
+        level: "info",
+        event: "payment.collect.start",
+        requestId: req.requestId,
+        actorId: String(req.user?._id || ""),
+        actorRole: req.user?.role || "",
+        customer: payload.customer,
+        scheme: payload.scheme,
+        amount: payload.amount,
+        paymentMethod: payload.paymentMethod,
+      })
+    );
+  }
   const result = await collectPayment(payload, req.user);
   res.status(201).json({ success: true, data: result });
 });
