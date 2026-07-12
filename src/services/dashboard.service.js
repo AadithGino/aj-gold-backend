@@ -14,10 +14,10 @@ const ApiError = require("../utils/ApiError");
 const { startOfDay, endOfDay, startOfMonth, parseDateRange } = require("../utils/date");
 const dayjs = require("dayjs");
 const {
-  getStaffCashInHand,
   getPaymentMethodBreakdown,
   getStaffCashSubmissionHistory,
 } = require("./cash.service");
+const { getStaffCashInHand } = require("./staffCash.service");
 const { getCashPositionSummary } = require("./cashPosition.service");
 const { enrichScheme } = require("./customer.service");
 const { getSchemeLimitSummary } = require("./paymentLimit.service");

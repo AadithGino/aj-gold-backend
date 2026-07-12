@@ -23,7 +23,9 @@ const login = async ({ phone, password }) => {
     throw new ApiError(400, "Phone and password are required.");
   }
 
-  const user = await User.findOne({ phone: phone.trim() }).select("+passwordHash tokenVersion");
+  const user = await User.findOne({ phone: phone.trim() }).select(
+    "name phone role status +passwordHash +tokenVersion"
+  );
   if (!user) throw new ApiError(401, "Invalid phone or password.");
   if (user.status === "INACTIVE") throw new ApiError(403, "Account is inactive.");
   if (!user.passwordHash) {

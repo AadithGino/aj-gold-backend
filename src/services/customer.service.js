@@ -176,7 +176,7 @@ const createCustomer = async (payload, actor) => {
     throw new ApiError(409, "Phone number is already registered.");
   }
 
-  const initialPassword = payload.password?.trim() || generateTemporaryPassword();
+  const initialPassword = payload.password?.trim() || passbookNumber;
   const temporaryPasswordReturned = payload.password?.trim() ? null : initialPassword;
   if (payload.password?.trim()) {
     assertPasswordStrength(initialPassword);

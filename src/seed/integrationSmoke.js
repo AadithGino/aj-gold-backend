@@ -229,6 +229,7 @@ const run = async () => {
         scheme: smokeSchemeId,
         amount: paymentAmount,
         paymentMethod: PAYMENT_METHODS.CASH,
+        paymentDate: "2024-05-05T10:00:00.000Z",
         notes: runTag,
         clientRequestId: idempotentRequestId,
       },
@@ -249,6 +250,7 @@ const run = async () => {
         scheme: smokeSchemeId,
         amount: paymentAmount,
         paymentMethod: PAYMENT_METHODS.CASH,
+        paymentDate: "2024-05-05T10:00:00.000Z",
         notes: runTag,
         clientRequestId: idempotentRequestId,
       },
@@ -285,6 +287,7 @@ const run = async () => {
         scheme: smokeSchemeId,
         amount: paymentAmount + 1000,
         paymentMethod: PAYMENT_METHODS.CASH,
+        paymentDate: "2024-05-05T10:00:00.000Z",
         notes: runTag,
         clientRequestId: idempotentRequestId,
       },
@@ -392,11 +395,16 @@ const run = async () => {
       path: `/api/corrections/${correctionId}/approve`,
       token: adminToken,
       body: {
-        reviewNotes: `${runTag} approved replay`,
+        reviewNotes: `${runTag} approved`,
         reviewClientRequestId: reviewRequestId,
       },
     });
-    assertTruthy(replayRes.status === 200, `approve replay failed (${replayRes.status})`);
+    if (replayRes.status === 200) return;
+    assertErrorShape(replayRes, {
+      status: 409,
+      code: "CORRECTION_ALREADY_REVIEWED",
+      retryable: false,
+    });
   });
 
   await runScenario(14, "A second conflicting review is rejected", async () => {

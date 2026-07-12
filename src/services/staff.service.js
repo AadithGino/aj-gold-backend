@@ -14,12 +14,12 @@ const {
 const ApiError = require("../utils/ApiError");
 const { getNextSequence } = require("./receipt.service");
 const {
-  getStaffCashInHand,
   getPaymentMethodBreakdown,
   getStaffCollectionTotal,
   getStaffPaymentHistory,
   getStaffCashSubmissionHistory,
 } = require("./cash.service");
+const { getStaffCashInHand } = require("./staffCash.service");
 const { logAudit } = require("./audit.service");
 const {
   startOfDay,
