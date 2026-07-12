@@ -1,9 +1,9 @@
 const DEFAULT_STAFF_PERMISSIONS = {
   canCollectPayment: true,
   canCreateCustomer: true,
-  canViewReports: false,
+  canViewReports: true,
   canSubmitCash: true,
-  canMarkRedeemed: false,
+  canMarkRedeemed: true,
   canMarkClosed: false,
 };
 
@@ -16,9 +16,9 @@ const resolveStaffPermissions = (permissions = {}) => {
   return {
     ...DEFAULT_STAFF_PERMISSIONS,
     ...stored,
-    canMarkRedeemed: stored.canMarkRedeemed === true,
+    canMarkRedeemed: stored.canMarkRedeemed !== false,
     canMarkClosed: stored.canMarkClosed === true,
-    canViewReports: stored.canViewReports === true,
+    canViewReports: stored.canViewReports !== false,
     canCollectPayment: stored.canCollectPayment !== false,
     canCreateCustomer: stored.canCreateCustomer !== false,
     canSubmitCash: stored.canSubmitCash !== false,

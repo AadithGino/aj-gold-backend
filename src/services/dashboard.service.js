@@ -16,8 +16,10 @@ const dayjs = require("dayjs");
 const {
   getPaymentMethodBreakdown,
   getStaffCashSubmissionHistory,
+  createCashSubmission,
 } = require("./cash.service");
 const { getStaffCashInHand } = require("./staffCash.service");
+const { resolveStaffPermissions, hasStaffPermission } = require("../constants/staffPermissions");
 const { getCashPositionSummary } = require("./cashPosition.service");
 const { enrichScheme } = require("./customer.service");
 const { getSchemeLimitSummary } = require("./paymentLimit.service");
@@ -479,6 +481,7 @@ const getRoleProfile = async (user) => {
         role: USER_ROLES.STAFF,
         employeeCode: staffProfile?.employeeCode || "",
         cashInHand: cashSummary.cashInHand,
+        permissions: resolveStaffPermissions(staffProfile?.permissions),
       },
       appVersion: APP_VERSION,
     };
@@ -594,6 +597,30 @@ const getStaffRedemptionHistory = async (user, { from, to } = {}) => {
   };
 };
 
+const submitStaffCash = async (user, payload) => {
+  if (user.role !== USER_ROLES.STAFF) {
+    throw new ApiError(403, "Staff only.");
+  }
+
+  const profile = await StaffProfile.findOne({ user: user._id });
+  if (!hasStaffPermission(profile, "canSubmitCash")) {
+    throw new ApiError(403, "Staff does not have cash submission permission.");
+  }
+
+  const { submission, cashSummary } = await createCashSubmission(
+    {
+      ...payload,
+      staff: user._id.toString(),
+    },
+    user
+  );
+
+  return {
+    submission,
+    cashSummary,
+  };
+};
+
 module.exports = {
   getAdminDashboard,
   getStaffDashboard,
@@ -601,4 +628,5 @@ module.exports = {
   getRoleProfile,
   getStaffCashSubmissions,
   getStaffRedemptionHistory,
+  submitStaffCash,
 };

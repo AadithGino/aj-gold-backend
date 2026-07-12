@@ -1,4 +1,5 @@
 const Scheme = require("../models/scheme.model");
+const StaffProfile = require("../models/staffProfile.model");
 const {
   SCHEME_STATUS,
   USER_ROLES,
@@ -7,6 +8,7 @@ const {
 } = require("../constants/enums");
 const ApiError = require("../utils/ApiError");
 const { ERROR_CODES } = require("../constants/errorCodes");
+const { hasStaffPermission } = require("../constants/staffPermissions");
 const { parsePositiveRupeeInteger } = require("../utils/money");
 const { withTransaction } = require("../utils/transaction");
 const { isSchemeSettled } = require("../utils/scheme");
@@ -86,8 +88,16 @@ const createScheme = async ({ customerId, schemeName, startDate }, actor) => {
 const updateSchemeStatus = async (schemeId, payload, actor) => {
   const { status, notes } = payload;
 
-  if (actor.role !== USER_ROLES.ADMIN) {
-    throw new ApiError(403, "Only admin can settle schemes.");
+  if (actor.role === USER_ROLES.STAFF) {
+    const profile = await StaffProfile.findOne({ user: actor._id });
+    if (status === SCHEME_STATUS.REDEEMED && !hasStaffPermission(profile, "canMarkRedeemed")) {
+      throw new ApiError(403, "Staff does not have redeem permission.");
+    }
+    if (status === SCHEME_STATUS.CLOSED && !hasStaffPermission(profile, "canMarkClosed")) {
+      throw new ApiError(403, "Staff does not have early closure permission.");
+    }
+  } else if (actor.role !== USER_ROLES.ADMIN) {
+    throw new ApiError(403, "Only admin or authorized staff can settle schemes.");
   }
 
   if (![SCHEME_STATUS.REDEEMED, SCHEME_STATUS.CLOSED].includes(status)) {

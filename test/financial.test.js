@@ -666,11 +666,19 @@ describe("financial hardening", () => {
       canCreateCustomer: false,
       canSubmitCash: false,
       canViewReports: false,
+      canMarkRedeemed: false,
     });
     assert.equal(resolved.canCollectPayment, false);
     assert.equal(resolved.canViewReports, false);
     assert.equal(resolved.canMarkRedeemed, false);
     assert.equal(resolved.canMarkClosed, false);
+  });
+
+  it("19b. staff permissions default to operational access when unset", () => {
+    const resolved = resolveStaffPermissions({});
+    assert.equal(resolved.canViewReports, true);
+    assert.equal(resolved.canMarkRedeemed, true);
+    assert.equal(resolved.canSubmitCash, true);
   });
 
   it("20. staff cannot access another staff member's restricted payment or receipt", async () => {

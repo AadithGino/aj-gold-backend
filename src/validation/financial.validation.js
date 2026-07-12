@@ -47,6 +47,8 @@ const cashSubmissionSchema = z.object({
   clientRequestId: clientRequestIdSchema,
 });
 
+const staffSelfCashSubmissionSchema = cashSubmissionSchema.omit({ staff: true });
+
 const schemeSettlementSchema = z.object({
   status: z.enum([SCHEME_STATUS.REDEEMED, SCHEME_STATUS.CLOSED]),
   settlementAmount: positiveRupeeSchema("settlementAmount"),
@@ -70,6 +72,7 @@ module.exports = {
   collectPaymentSchema,
   reversePaymentSchema,
   cashSubmissionSchema,
+  staffSelfCashSubmissionSchema,
   schemeSettlementSchema,
   correctionReviewSchema,
 };
