@@ -9,18 +9,13 @@ const {
 } = require("../services/correction.service");
 const ApiError = require("../utils/ApiError");
 const asyncHandler = require("../utils/asyncHandler");
+const { correctionReviewSchema } = require("../validation/financial.validation");
 
 const createSchema = z.object({
   correctionType: z.enum(Object.values(CORRECTION_TYPES)),
   requestedValue: z.any().optional(),
   reason: z.string().trim().min(3, "Reason is required."),
   notes: z.string().trim().optional(),
-});
-
-const reviewSchema = z.object({
-  reviewNotes: z.string().trim().optional(),
-  approvedValue: z.any().optional(),
-  reason: z.string().trim().optional(),
 });
 
 const parseBody = (schema, body) => {
@@ -48,13 +43,13 @@ const getCorrectionHandler = asyncHandler(async (req, res) => {
 });
 
 const approveCorrectionHandler = asyncHandler(async (req, res) => {
-  const payload = parseBody(reviewSchema, req.body);
+  const payload = parseBody(correctionReviewSchema, req.body);
   const data = await approveCorrection(req.params.correctionId, payload, req.user);
   res.json({ success: true, data });
 });
 
 const rejectCorrectionHandler = asyncHandler(async (req, res) => {
-  const payload = parseBody(reviewSchema, req.body);
+  const payload = parseBody(correctionReviewSchema, req.body);
   const data = await rejectCorrection(req.params.correctionId, payload, req.user);
   res.json({ success: true, data });
 });

@@ -19,9 +19,11 @@ const { createStaff } = require("../services/staff.service");
 const { createCustomer } = require("../services/customer.service");
 const { createScheme } = require("../services/schemeManagement.service");
 const { collectPayment, reversePayment } = require("../services/payment.service");
-const { getStaffCashInHand, getReceiptDisplayData } = require("../services/cash.service");
+const { getReceiptDisplayData } = require("../services/cash.service");
+const { getStaffCashInHand } = require("../services/staffCash.service");
 const { getTotalPaidForScheme } = require("../services/paymentLimit.service");
 const ApiError = require("../utils/ApiError");
+const { clientRequestId } = require("./smokeHelpers");
 
 const SMOKE_TAG = "SMOKE-P5";
 const PASSBOOK_FORMAT = /^\d{4}$/;
@@ -101,6 +103,7 @@ const run = async () => {
         amount: 30000,
         paymentMethod: PAYMENT_METHODS.CASH,
         paymentDate: new Date("2025-02-01"),
+        clientRequestId: clientRequestId(),
       },
       staffUser
     );
@@ -121,6 +124,7 @@ const run = async () => {
         amount: 30000,
         paymentMethod: PAYMENT_METHODS.CASH,
         paymentDate: new Date("2025-04-01"),
+        clientRequestId: clientRequestId(),
       },
       staffUser
     );
@@ -136,8 +140,9 @@ const run = async () => {
           scheme: scheme._id.toString(),
           amount: 70000,
           paymentMethod: PAYMENT_METHODS.CASH,
-          paymentDate: new Date("2025-08-01"),
-        },
+        paymentDate: new Date("2025-08-01"),
+        clientRequestId: clientRequestId(),
+      },
         staffUser
       );
     } catch (error) {
@@ -153,6 +158,7 @@ const run = async () => {
         paymentMethod: PAYMENT_METHODS.CASH,
         paymentDate: new Date("2025-08-01"),
         overrideReason: `${runTag} admin override for smoke test`,
+        clientRequestId: clientRequestId(),
       },
       admin
     );
@@ -171,6 +177,7 @@ const run = async () => {
           paymentMethod: method,
           paymentDate: new Date("2025-03-01"),
           transactionReference: `${runTag}-${method}`,
+          clientRequestId: clientRequestId(),
         },
         staffUser
       );
@@ -190,7 +197,7 @@ const run = async () => {
 
     await reversePayment(
       cashResult.payment._id,
-      { reason: `${runTag} reversal`, notes: "Smoke reverse" },
+      { reason: `${runTag} reversal`, notes: "Smoke reverse", clientRequestId: clientRequestId() },
       admin
     );
 

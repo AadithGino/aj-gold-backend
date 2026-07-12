@@ -1,5 +1,3 @@
-const { z } = require("zod");
-const { SCHEME_STATUS } = require("../constants/enums");
 const {
   createScheme,
   updateSchemeStatus,
@@ -7,16 +5,13 @@ const {
 } = require("../services/schemeManagement.service");
 const ApiError = require("../utils/ApiError");
 const asyncHandler = require("../utils/asyncHandler");
+const { z } = require("zod");
+const { schemeSettlementSchema } = require("../validation/financial.validation");
 
 const createSchemeSchema = z.object({
   customerId: z.string().min(1, "Customer is required."),
   schemeName: z.string().trim().optional(),
   startDate: z.coerce.date().optional(),
-});
-
-const updateSchemeStatusSchema = z.object({
-  status: z.enum(Object.values(SCHEME_STATUS)),
-  notes: z.string().trim().optional(),
 });
 
 const parseBody = (schema, body) => {
@@ -47,7 +42,7 @@ const getSchemeHandler = asyncHandler(async (req, res) => {
 });
 
 const updateSchemeStatusHandler = asyncHandler(async (req, res) => {
-  const payload = parseBody(updateSchemeStatusSchema, req.body);
+  const payload = parseBody(schemeSettlementSchema, req.body);
   const scheme = await updateSchemeStatus(req.params.schemeId, payload, req.user);
 
   return res.status(200).json({

@@ -1,25 +1,19 @@
-const { login, me } = require("../services/auth.service");
+const { login, me, logout } = require("../services/auth.service");
+const asyncHandler = require("../utils/asyncHandler");
 
-const loginController = async (req, res, next) => {
-  try {
-    const result = await login(req.body);
-    res.json({ success: true, data: result });
-  } catch (err) {
-    next(err);
-  }
-};
+const loginController = asyncHandler(async (req, res) => {
+  const result = await login(req.body);
+  res.json({ success: true, data: result });
+});
 
-const meController = async (req, res, next) => {
-  try {
-    const data = await me(req.user);
-    res.json({ success: true, data });
-  } catch (err) {
-    next(err);
-  }
-};
+const meController = asyncHandler(async (req, res) => {
+  const data = await me(req.user);
+  res.json({ success: true, data });
+});
 
-const logoutController = async (req, res) => {
-  res.json({ success: true, message: "Logged out successfully." });
-};
+const logoutController = asyncHandler(async (req, res) => {
+  const data = await logout(req.user);
+  res.json({ success: true, data });
+});
 
 module.exports = { loginController, meController, logoutController };

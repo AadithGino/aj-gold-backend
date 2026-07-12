@@ -7,7 +7,6 @@ const paymentCorrectionSchema = new mongoose.Schema(
       type: mongoose.Schema.Types.ObjectId,
       ref: "Payment",
       required: true,
-      index: true,
     },
     customer: {
       type: mongoose.Schema.Types.ObjectId,
@@ -34,6 +33,7 @@ const paymentCorrectionSchema = new mongoose.Schema(
       required: true,
     },
     originalSnapshot: { type: mongoose.Schema.Types.Mixed, required: true },
+    appliedSnapshot: { type: mongoose.Schema.Types.Mixed },
     requestedValue: { type: mongoose.Schema.Types.Mixed },
     reason: { type: String, required: true, trim: true },
     status: {
@@ -45,11 +45,16 @@ const paymentCorrectionSchema = new mongoose.Schema(
     reviewedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
     reviewedAt: Date,
     reviewNotes: { type: String, trim: true, default: "" },
+    reviewClientRequestId: { type: String, trim: true },
     notes: { type: String, trim: true, default: "" },
   },
   { timestamps: true }
 );
 
 paymentCorrectionSchema.index({ status: 1, createdAt: -1 });
+paymentCorrectionSchema.index(
+  { payment: 1 },
+  { unique: true, partialFilterExpression: { status: CORRECTION_STATUS.PENDING } }
+);
 
 module.exports = mongoose.model("PaymentCorrection", paymentCorrectionSchema);

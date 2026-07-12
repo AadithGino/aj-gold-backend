@@ -1,5 +1,6 @@
 const PaymentCorrection = require("../models/paymentCorrection.model");
 const Payment = require("../models/payment.model");
+const Scheme = require("../models/scheme.model");
 const Customer = require("../models/customer.model");
 const {
   USER_ROLES,
@@ -8,13 +9,26 @@ const {
   PAYMENT_STATUS,
   PAYMENT_METHODS,
   AUDIT_ACTIONS,
+  IDEMPOTENCY_OPERATIONS,
 } = require("../constants/enums");
 const ApiError = require("../utils/ApiError");
+const { ERROR_CODES } = require("../constants/errorCodes");
+const { parsePositiveRupeeInteger } = require("../utils/money");
+const { withTransaction } = require("../utils/transaction");
+const { isSchemeSettled } = require("../utils/scheme");
 const { parseDateRange } = require("../utils/date");
 const { logAudit } = require("./audit.service");
 const { getPaymentByIdOrThrow } = require("./payment.service");
 const { getSchemeLimitSummary } = require("./paymentLimit.service");
 const { notifyPaymentReversed } = require("./notification.service");
+const {
+  checkIdempotencyReplay,
+  saveIdempotencyResult,
+} = require("./idempotency.service");
+const {
+  lockStaffCashProfile,
+  assertNoNegativeCashAfterPaymentChange,
+} = require("./staffCash.service");
 
 const buildPaymentSnapshot = (payment) => ({
   amount: payment.amount,
@@ -35,6 +49,7 @@ const mapCorrection = (doc) => ({
   requestedByRole: doc.requestedByRole,
   correctionType: doc.correctionType,
   originalSnapshot: doc.originalSnapshot,
+  appliedSnapshot: doc.appliedSnapshot,
   requestedValue: doc.requestedValue,
   reason: doc.reason,
   status: doc.status,
@@ -46,7 +61,7 @@ const mapCorrection = (doc) => ({
   updatedAt: doc.updatedAt,
 });
 
-const assertCanRequestCorrection = async (payment, actor) => {
+const assertCanRequestCorrection = async (payment, actor, session = null) => {
   if (actor.role === USER_ROLES.CUSTOMER) {
     throw new ApiError(403, "Customers cannot request payment corrections.");
   }
@@ -58,12 +73,23 @@ const assertCanRequestCorrection = async (payment, actor) => {
     }
   }
 
+  const scheme = await Scheme.findById(payment.scheme._id || payment.scheme).session(session || null);
+  if (scheme && isSchemeSettled(scheme)) {
+    throw new ApiError(409, "Scheme is already settled.", [], {
+      code: ERROR_CODES.SCHEME_ALREADY_SETTLED,
+      retryable: false,
+    });
+  }
+
   const pending = await PaymentCorrection.findOne({
     payment: payment._id,
     status: CORRECTION_STATUS.PENDING,
-  });
+  }).session(session || null);
   if (pending) {
-    throw new ApiError(409, "A pending correction already exists for this payment.");
+    throw new ApiError(409, "A pending correction already exists for this payment.", [], {
+      code: ERROR_CODES.PENDING_CORRECTION_EXISTS,
+      retryable: false,
+    });
   }
 };
 
@@ -76,11 +102,8 @@ const validateRequestedValue = (correctionType, requestedValue) => {
   }
 
   switch (correctionType) {
-    case CORRECTION_TYPES.EDIT_AMOUNT: {
-      const amount = Number(requestedValue);
-      if (!amount || amount <= 0) throw new ApiError(400, "Amount must be greater than zero.");
-      return amount;
-    }
+    case CORRECTION_TYPES.EDIT_AMOUNT:
+      return parsePositiveRupeeInteger(requestedValue, "amount");
     case CORRECTION_TYPES.EDIT_METHOD: {
       if (!Object.values(PAYMENT_METHODS).includes(requestedValue)) {
         throw new ApiError(400, "Invalid payment method.");
@@ -153,39 +176,118 @@ const createCorrectionRequest = async (paymentId, payload, actor) => {
   );
 };
 
-const applyApprovedCorrection = async (payment, correction, approvedValue) => {
-  const { correctionType } = correction;
+const resolveApprovedValues = (payment, correction, approvedValue) => {
   const value = approvedValue != null ? approvedValue : correction.requestedValue;
+  const { correctionType } = correction;
 
   if (correctionType === CORRECTION_TYPES.REVERSE_PAYMENT) {
-    payment.status = PAYMENT_STATUS.REVERSED;
-    payment.notes = correction.reason;
-    await payment.save();
-    return payment;
+    return {
+      amount: payment.amount,
+      paymentMethod: payment.paymentMethod,
+      paymentDate: payment.paymentDate,
+      transactionReference: payment.transactionReference || "",
+      notes: correction.reason,
+      status: PAYMENT_STATUS.REVERSED,
+    };
   }
+
+  const next = {
+    amount: payment.amount,
+    paymentMethod: payment.paymentMethod,
+    paymentDate: payment.paymentDate,
+    transactionReference: payment.transactionReference || "",
+    notes: payment.notes || "",
+    status: payment.status,
+  };
 
   switch (correctionType) {
     case CORRECTION_TYPES.EDIT_AMOUNT:
-      payment.amount = Number(value);
+      next.amount = parsePositiveRupeeInteger(value, "amount");
       break;
     case CORRECTION_TYPES.EDIT_METHOD:
-      payment.paymentMethod = value;
+      if (!Object.values(PAYMENT_METHODS).includes(value)) {
+        throw new ApiError(400, "Invalid payment method.");
+      }
+      next.paymentMethod = value;
       break;
-    case CORRECTION_TYPES.EDIT_DATE:
-      payment.paymentDate = new Date(value);
+    case CORRECTION_TYPES.EDIT_DATE: {
+      const date = new Date(value);
+      if (Number.isNaN(date.getTime())) throw new ApiError(400, "Invalid payment date.");
+      next.paymentDate = date;
       break;
+    }
     case CORRECTION_TYPES.EDIT_REFERENCE:
-      payment.transactionReference = String(value);
+      next.transactionReference = String(value);
       break;
     case CORRECTION_TYPES.EDIT_NOTES:
-      payment.notes = String(value);
+      next.notes = String(value);
       break;
     default:
       throw new ApiError(400, "Unsupported correction type.");
   }
 
-  await payment.save();
-  return payment;
+  return next;
+};
+
+const applyCashCorrectionGuards = async (payment, nextValues, session) => {
+  const staffCollector =
+    payment.collectedByRole === USER_ROLES.STAFF ? payment.collectedBy : null;
+  if (!staffCollector) return;
+
+  const affectsCash =
+    payment.paymentMethod === PAYMENT_METHODS.CASH ||
+    nextValues.paymentMethod === PAYMENT_METHODS.CASH;
+
+  if (!affectsCash) return;
+
+  await lockStaffCashProfile(staffCollector, session);
+  await assertNoNegativeCashAfterPaymentChange({
+    staffId: staffCollector,
+    previousAmount: payment.amount,
+    previousMethod: payment.paymentMethod,
+    nextAmount: nextValues.amount,
+    nextMethod: nextValues.paymentMethod,
+    session,
+  });
+};
+
+const applyApprovedCorrection = async (payment, correction, approvedValue, session) => {
+  const nextValues = resolveApprovedValues(payment, correction, approvedValue);
+
+  if (
+    nextValues.status === PAYMENT_STATUS.REVERSED ||
+    correction.correctionType === CORRECTION_TYPES.REVERSE_PAYMENT
+  ) {
+    await applyCashCorrectionGuards(payment, nextValues, session);
+    payment.status = PAYMENT_STATUS.REVERSED;
+    payment.notes = nextValues.notes;
+    await payment.save({ session });
+    return buildPaymentSnapshot(payment);
+  }
+
+  await applyCashCorrectionGuards(payment, nextValues, session);
+
+  payment.amount = nextValues.amount;
+  payment.paymentMethod = nextValues.paymentMethod;
+  payment.paymentDate = nextValues.paymentDate;
+  payment.transactionReference = nextValues.transactionReference;
+  payment.notes = nextValues.notes;
+  await payment.save({ session });
+
+  return buildPaymentSnapshot(payment);
+};
+
+const assertSettlementAllowsCorrection = (scheme, payload) => {
+  if (!isSchemeSettled(scheme)) return;
+
+  const allowOverride = Boolean(payload.settlementAdjustmentOverride);
+  const overrideReason = payload.settlementAdjustmentReason?.trim() || "";
+  if (!allowOverride || !overrideReason) {
+    throw new ApiError(
+      409,
+      "Scheme is settled. Provide settlementAdjustmentOverride and settlementAdjustmentReason."
+    );
+  }
 };
 
 const approveCorrection = async (correctionId, payload, actor) => {
@@ -193,49 +295,130 @@ const approveCorrection = async (correctionId, payload, actor) => {
     throw new ApiError(403, "Only admin can approve corrections.");
   }
 
-  const correction = await PaymentCorrection.findById(correctionId);
-  if (!correction) throw new ApiError(404, "Correction request not found.");
-  if (correction.status !== CORRECTION_STATUS.PENDING) {
-    throw new ApiError(409, "Correction is not pending.");
-  }
+  const idempotencyPayload = {
+    correctionId,
+    approvedValue: payload.approvedValue ?? null,
+    reviewNotes: payload.reviewNotes?.trim() || "",
+    settlementAdjustmentOverride: Boolean(payload.settlementAdjustmentOverride),
+    settlementAdjustmentReason: payload.settlementAdjustmentReason?.trim() || "",
+  };
 
-  const payment = await Payment.findById(correction.payment);
-  if (!payment) throw new ApiError(404, "Linked payment not found.");
+  const txnResult = await withTransaction(async (session) => {
+    const replay = await checkIdempotencyReplay({
+      clientRequestId: payload.reviewClientRequestId,
+      operationType: IDEMPOTENCY_OPERATIONS.CORRECTION_APPROVE,
+      requestPayload: idempotencyPayload,
+      session,
+    });
+    if (replay.replay) {
+      return { replay: true, response: replay.response };
+    }
 
-  const approvedValue =
-    payload.approvedValue != null
-      ? validateRequestedValue(correction.correctionType, payload.approvedValue)
-      : correction.requestedValue;
+    const correction = await PaymentCorrection.findOneAndUpdate(
+      { _id: correctionId, status: CORRECTION_STATUS.PENDING },
+      {
+        $set: {
+          status: CORRECTION_STATUS.APPROVED,
+          reviewedBy: actor._id,
+          reviewedAt: new Date(),
+          reviewNotes: payload.reviewNotes?.trim() || "",
+          reviewClientRequestId: payload.reviewClientRequestId,
+        },
+      },
+      { new: false, session }
+    );
 
-  await applyApprovedCorrection(payment, correction, approvedValue);
+    if (!correction) {
+      const existing = await PaymentCorrection.findById(correctionId).session(session);
+      if (!existing) throw new ApiError(404, "Correction request not found.");
+      throw new ApiError(409, "Correction is not pending.", [], {
+        code: ERROR_CODES.CORRECTION_ALREADY_REVIEWED,
+        retryable: false,
+      });
+    }
 
-  correction.status = CORRECTION_STATUS.APPROVED;
-  correction.reviewedBy = actor._id;
-  correction.reviewedAt = new Date();
-  correction.reviewNotes = payload.reviewNotes?.trim() || "";
-  if (payload.approvedValue != null) {
-    correction.requestedValue = approvedValue;
-  }
-  await correction.save();
+    const payment = await Payment.findById(correction.payment).session(session);
+    if (!payment) throw new ApiError(404, "Linked payment not found.");
+    if (payment.status !== PAYMENT_STATUS.SUCCESS && correction.correctionType !== CORRECTION_TYPES.REVERSE_PAYMENT) {
+      throw new ApiError(409, "Only SUCCESS payments can be corrected.");
+    }
 
-  await logAudit({
-    actor: actor._id,
-    actorRole: actor.role,
-    action: AUDIT_ACTIONS.CORRECTION_APPROVED,
-    targetType: "PaymentCorrection",
-    targetId: correction._id,
-    previousValue: correction.originalSnapshot,
-    newValue: {
-      paymentId: payment._id,
-      correctionType: correction.correctionType,
+    const scheme = await Scheme.findById(correction.scheme).session(session);
+    if (!scheme) throw new ApiError(404, "Scheme not found.");
+    assertSettlementAllowsCorrection(scheme, payload);
+
+    const approvedValue =
+      payload.approvedValue != null
+        ? validateRequestedValue(correction.correctionType, payload.approvedValue)
+        : correction.requestedValue;
+
+    const appliedSnapshot = await applyApprovedCorrection(
+      payment,
+      correction,
       approvedValue,
-    },
-    notes: correction.reviewNotes || payload.reason || "Correction approved",
+      session
+    );
+
+    await PaymentCorrection.updateOne(
+      { _id: correction._id },
+      {
+        $set: {
+          appliedSnapshot,
+          requestedValue: payload.approvedValue != null ? approvedValue : correction.requestedValue,
+        },
+      },
+      { session }
+    );
+
+    await logAudit({
+      actor: actor._id,
+      actorRole: actor.role,
+      action: AUDIT_ACTIONS.CORRECTION_APPROVED,
+      targetType: "PaymentCorrection",
+      targetId: correction._id,
+      previousValue: correction.originalSnapshot,
+      newValue: {
+        paymentId: payment._id,
+        correctionType: correction.correctionType,
+        approvedValue,
+        appliedSnapshot,
+        reviewClientRequestId: payload.reviewClientRequestId,
+        settlementAdjustmentOverride: Boolean(payload.settlementAdjustmentOverride),
+        settlementAdjustmentReason: payload.settlementAdjustmentReason?.trim() || "",
+      },
+      notes: payload.reviewNotes?.trim() || payload.reason || "Correction approved",
+      session,
+    });
+
+    const response = {
+      correctionId: correction._id,
+      paymentId: payment._id,
+      schemeId: payment.scheme,
+      notifyReverse: correction.correctionType === CORRECTION_TYPES.REVERSE_PAYMENT,
+    };
+
+    await saveIdempotencyResult({
+      clientRequestId: replay.clientRequestId,
+      operationType: IDEMPOTENCY_OPERATIONS.CORRECTION_APPROVE,
+      requestHash: replay.requestHash,
+      responsePayload: response,
+      actor,
+      resourceType: "PaymentCorrection",
+      resourceId: correction._id,
+      session,
+    });
+
+    return { replay: false, response };
   });
 
-  if (correction.correctionType === CORRECTION_TYPES.REVERSE_PAYMENT) {
+  const correctionRef = txnResult.replay
+    ? txnResult.response.correctionId
+    : txnResult.response.correctionId;
+
+  if (!txnResult.replay && txnResult.response.notifyReverse) {
+    const payment = await Payment.findById(txnResult.response.paymentId);
     const customer = await Customer.findById(payment.customer).lean();
-    if (customer) {
+    if (customer && payment) {
       notifyPaymentReversed({
         customer,
         payment: {
@@ -247,8 +430,10 @@ const approveCorrection = async (correctionId, payload, actor) => {
     }
   }
 
-  const schemeSummary = await getSchemeLimitSummary(payment.scheme);
-  const populated = await PaymentCorrection.findById(correction._id)
+  const schemeSummary = await getSchemeLimitSummary(
+    txnResult.replay ? txnResult.response.schemeId : txnResult.response.schemeId
+  );
+  const populated = await PaymentCorrection.findById(correctionRef)
     .populate("requestedBy", "name role")
     .populate("reviewedBy", "name role")
     .populate("payment", "receiptNumber amount paymentMethod status");
@@ -261,28 +446,76 @@ const rejectCorrection = async (correctionId, payload, actor) => {
     throw new ApiError(403, "Only admin can reject corrections.");
   }
 
-  const correction = await PaymentCorrection.findById(correctionId);
-  if (!correction) throw new ApiError(404, "Correction request not found.");
-  if (correction.status !== CORRECTION_STATUS.PENDING) {
-    throw new ApiError(409, "Correction is not pending.");
-  }
+  const idempotencyPayload = {
+    correctionId,
+    reviewNotes: payload.reviewNotes?.trim() || payload.reason?.trim() || "",
+  };
 
-  correction.status = CORRECTION_STATUS.REJECTED;
-  correction.reviewedBy = actor._id;
-  correction.reviewedAt = new Date();
-  correction.reviewNotes = payload.reviewNotes?.trim() || payload.reason?.trim() || "";
-  await correction.save();
+  const txnResult = await withTransaction(async (session) => {
+    const replay = await checkIdempotencyReplay({
+      clientRequestId: payload.reviewClientRequestId,
+      operationType: IDEMPOTENCY_OPERATIONS.CORRECTION_REJECT,
+      requestPayload: idempotencyPayload,
+      session,
+    });
+    if (replay.replay) {
+      return { replay: true, response: replay.response };
+    }
 
-  await logAudit({
-    actor: actor._id,
-    actorRole: actor.role,
-    action: AUDIT_ACTIONS.CORRECTION_REJECTED,
-    targetType: "PaymentCorrection",
-    targetId: correction._id,
-    notes: correction.reviewNotes || "Correction rejected",
+    const correction = await PaymentCorrection.findOneAndUpdate(
+      { _id: correctionId, status: CORRECTION_STATUS.PENDING },
+      {
+        $set: {
+          status: CORRECTION_STATUS.REJECTED,
+          reviewedBy: actor._id,
+          reviewedAt: new Date(),
+          reviewNotes: payload.reviewNotes?.trim() || payload.reason?.trim() || "",
+          reviewClientRequestId: payload.reviewClientRequestId,
+        },
+      },
+      { new: true, session }
+    );
+
+    if (!correction) {
+      const existing = await PaymentCorrection.findById(correctionId).session(session);
+      if (!existing) throw new ApiError(404, "Correction request not found.");
+      throw new ApiError(409, "Correction is not pending.", [], {
+        code: ERROR_CODES.CORRECTION_ALREADY_REVIEWED,
+        retryable: false,
+      });
+    }
+
+    await logAudit({
+      actor: actor._id,
+      actorRole: actor.role,
+      action: AUDIT_ACTIONS.CORRECTION_REJECTED,
+      targetType: "PaymentCorrection",
+      targetId: correction._id,
+      notes: correction.reviewNotes || "Correction rejected",
+      session,
+    });
+
+    const response = { correctionId: correction._id };
+
+    await saveIdempotencyResult({
+      clientRequestId: replay.clientRequestId,
+      operationType: IDEMPOTENCY_OPERATIONS.CORRECTION_REJECT,
+      requestHash: replay.requestHash,
+      responsePayload: response,
+      actor,
+      resourceType: "PaymentCorrection",
+      resourceId: correction._id,
+      session,
+    });
+
+    return { replay: false, response };
   });
 
-  const populated = await PaymentCorrection.findById(correction._id)
+  const correctionRef = txnResult.replay
+    ? txnResult.response.correctionId
+    : txnResult.response.correctionId;
+
+  const populated = await PaymentCorrection.findById(correctionRef)
     .populate("requestedBy", "name role")
     .populate("reviewedBy", "name role")
     .populate("payment", "receiptNumber amount paymentMethod status");

@@ -6,63 +6,78 @@ const ApiError = require("../utils/ApiError");
 
 const successMatch = { status: PAYMENT_STATUS.SUCCESS };
 
-const getSchemeOrThrow = async (schemeId) => {
-  const scheme = await Scheme.findById(schemeId);
+const aggregateWithSession = (pipeline, session) => {
+  let query = Payment.aggregate(pipeline);
+  if (session) query = query.session(session);
+  return query;
+};
+
+const getSchemeOrThrow = async (schemeId, session = null) => {
+  const scheme = await Scheme.findById(schemeId).session(session || null);
   if (!scheme) {
     throw new ApiError(404, "Scheme not found.");
   }
   return scheme;
 };
 
-const getPaymentsForScheme = async (schemeId, extraFilter = {}) => {
-  return Payment.find({ scheme: schemeId, ...successMatch, ...extraFilter });
+const getPaymentsForScheme = async (schemeId, extraFilter = {}, session = null) => {
+  return Payment.find({ scheme: schemeId, ...successMatch, ...extraFilter }).session(session || null);
 };
 
-const getTotalPaidForScheme = async (schemeId) => {
-  const result = await Payment.aggregate([
-    { $match: { scheme: schemeId, status: PAYMENT_STATUS.SUCCESS } },
-    { $group: { _id: null, total: { $sum: "$amount" } } },
-  ]);
+const getTotalPaidForScheme = async (schemeId, session = null) => {
+  const result = await aggregateWithSession(
+    [
+      { $match: { scheme: schemeId, status: PAYMENT_STATUS.SUCCESS } },
+      { $group: { _id: null, total: { $sum: "$amount" } } },
+    ],
+    session
+  );
 
   return result[0]?.total || 0;
 };
 
-const getFirstSixMonthsPaid = async (schemeId, sixMonthDate) => {
-  const result = await Payment.aggregate([
-    {
-      $match: {
-        scheme: schemeId,
-        status: PAYMENT_STATUS.SUCCESS,
-        paymentDate: { $lte: sixMonthDate },
+const getFirstSixMonthsPaid = async (schemeId, sixMonthDate, session = null) => {
+  const result = await aggregateWithSession(
+    [
+      {
+        $match: {
+          scheme: schemeId,
+          status: PAYMENT_STATUS.SUCCESS,
+          paymentDate: { $lte: sixMonthDate },
+        },
       },
-    },
-    { $group: { _id: null, total: { $sum: "$amount" } } },
-  ]);
+      { $group: { _id: null, total: { $sum: "$amount" } } },
+    ],
+    session
+  );
 
   return result[0]?.total || 0;
 };
 
-const getAfterSixMonthsPaid = async (schemeId, sixMonthDate) => {
-  const result = await Payment.aggregate([
-    {
-      $match: {
-        scheme: schemeId,
-        status: PAYMENT_STATUS.SUCCESS,
-        paymentDate: { $gt: sixMonthDate },
+const getAfterSixMonthsPaid = async (schemeId, sixMonthDate, session = null) => {
+  const result = await aggregateWithSession(
+    [
+      {
+        $match: {
+          scheme: schemeId,
+          status: PAYMENT_STATUS.SUCCESS,
+          paymentDate: { $gt: sixMonthDate },
+        },
       },
-    },
-    { $group: { _id: null, total: { $sum: "$amount" } } },
-  ]);
+      { $group: { _id: null, total: { $sum: "$amount" } } },
+    ],
+    session
+  );
 
   return result[0]?.total || 0;
 };
 
-const getSchemeLimitSummary = async (schemeId) => {
-  const scheme = await getSchemeOrThrow(schemeId);
+const getSchemeLimitSummary = async (schemeId, session = null) => {
+  const scheme = await getSchemeOrThrow(schemeId, session);
 
-  const firstSixMonthsPaid = await getFirstSixMonthsPaid(schemeId, scheme.sixMonthDate);
-  const afterSixMonthsPaid = await getAfterSixMonthsPaid(schemeId, scheme.sixMonthDate);
-  const totalPaid = await getTotalPaidForScheme(schemeId);
+  const firstSixMonthsPaid = await getFirstSixMonthsPaid(schemeId, scheme.sixMonthDate, session);
+  const afterSixMonthsPaid = await getAfterSixMonthsPaid(schemeId, scheme.sixMonthDate, session);
+  const totalPaid = await getTotalPaidForScheme(schemeId, session);
   const remainingAllowedPayment = Math.max(firstSixMonthsPaid - afterSixMonthsPaid, 0);
 
   return {
@@ -76,19 +91,19 @@ const getSchemeLimitSummary = async (schemeId) => {
   };
 };
 
-const willNewPaymentExceedLimit = async (schemeId, amount, paymentDate = new Date()) => {
-  const scheme = await getSchemeOrThrow(schemeId);
+const willNewPaymentExceedLimit = async (schemeId, amount, paymentDate = new Date(), session = null) => {
+  const scheme = await getSchemeOrThrow(schemeId, session);
   const paymentAt = paymentDate instanceof Date ? paymentDate : new Date(paymentDate);
 
   if (isSameOrBefore(paymentAt, scheme.sixMonthDate)) {
     return {
       exceedsLimit: false,
       reason: "Within first six months — after-six-month cap does not apply.",
-      ...await getSchemeLimitSummary(schemeId),
+      ...(await getSchemeLimitSummary(schemeId, session)),
     };
   }
 
-  const summary = await getSchemeLimitSummary(schemeId);
+  const summary = await getSchemeLimitSummary(schemeId, session);
   const exceedsLimit = amount > summary.remainingAllowedPayment;
 
   return {

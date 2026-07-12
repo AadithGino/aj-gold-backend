@@ -3,15 +3,9 @@ const DEFAULT_STAFF_PERMISSIONS = {
   canCreateCustomer: true,
   canViewReports: false,
   canSubmitCash: true,
-  canMarkRedeemed: true,
-  canMarkClosed: true,
+  canMarkRedeemed: false,
+  canMarkClosed: false,
 };
-
-const isLegacyLockedProfile = (permissions = {}) =>
-  !permissions.canCollectPayment &&
-  !permissions.canCreateCustomer &&
-  !permissions.canSubmitCash &&
-  !permissions.canViewReports;
 
 const resolveStaffPermissions = (permissions = {}) => {
   const stored =
@@ -19,13 +13,15 @@ const resolveStaffPermissions = (permissions = {}) => {
     permissions ||
     {};
 
-  if (isLegacyLockedProfile(stored)) {
-    return { ...DEFAULT_STAFF_PERMISSIONS };
-  }
-
   return {
     ...DEFAULT_STAFF_PERMISSIONS,
     ...stored,
+    canMarkRedeemed: stored.canMarkRedeemed === true,
+    canMarkClosed: stored.canMarkClosed === true,
+    canViewReports: stored.canViewReports === true,
+    canCollectPayment: stored.canCollectPayment !== false,
+    canCreateCustomer: stored.canCreateCustomer !== false,
+    canSubmitCash: stored.canSubmitCash !== false,
   };
 };
 
@@ -36,5 +32,4 @@ module.exports = {
   DEFAULT_STAFF_PERMISSIONS,
   resolveStaffPermissions,
   hasStaffPermission,
-  isLegacyLockedProfile,
 };

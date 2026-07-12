@@ -24,6 +24,7 @@ const { createCustomer } = require("../services/customer.service");
 const { createScheme } = require("../services/schemeManagement.service");
 const { collectPayment, reversePayment } = require("../services/payment.service");
 const { createCashSubmission } = require("../services/cash.service");
+const { clientRequestId } = require("./smokeHelpers");
 const {
   getCollectionReport,
   getStaffPerformanceReport,
@@ -144,6 +145,7 @@ const run = async () => {
           amount: 10000,
           paymentMethod: PAYMENT_METHODS.CASH,
           paymentDate: new Date("2025-02-01"),
+          clientRequestId: clientRequestId(),
         },
         staffUser
       )
@@ -156,6 +158,7 @@ const run = async () => {
         amount: 20000,
         paymentMethod: PAYMENT_METHODS.CASH,
         paymentDate: new Date("2025-03-01"),
+        clientRequestId: clientRequestId(),
       },
       staffUser
     );
@@ -173,6 +176,7 @@ const run = async () => {
           paymentMethod: method,
           paymentDate: new Date("2025-04-01"),
           transactionReference: `${runTag}-${method}`,
+          clientRequestId: clientRequestId(),
         },
         staffUser
       );
@@ -180,7 +184,7 @@ const run = async () => {
 
     await reversePayment(
       cashPayment._id,
-      { reason: `${runTag} reversal`, notes: "Smoke reverse" },
+      { reason: `${runTag} reversal`, notes: "Smoke reverse", clientRequestId: clientRequestId() },
       admin
     );
 
@@ -191,6 +195,7 @@ const run = async () => {
         submissionDate: new Date(),
         receivedBy: "Admin User",
         notes: runTag,
+        clientRequestId: clientRequestId(),
       },
       admin
     );
@@ -242,7 +247,7 @@ const run = async () => {
     assert(cashPosition.totalCashInVault === cashPosition.cashInVault, "totalCashInVault equals cashInVault");
     assert(cashPosition.settlementTrackingImplemented === true, "Cash position settlementTrackingImplemented is true");
     assert(typeof cashPosition.totalCustomerSettlement === "number", "Cash position has totalCustomerSettlement");
-    assert(typeof cashPosition.totalCashCustomerSettlement === "number", "Cash position has totalCashCustomerSettlement");
+    assert(typeof cashPosition.totalCustomerSettlement === "number", "Cash position has totalCustomerSettlement");
     assert(
       cashPosition.cashInVault ===
         cashPosition.totalCashSubmittedToVault +

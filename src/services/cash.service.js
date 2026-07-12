@@ -2,12 +2,30 @@ const Payment = require("../models/payment.model");
 const CashSubmission = require("../models/cashSubmission.model");
 const User = require("../models/user.model");
 const mongoose = require("mongoose");
-const { PAYMENT_METHODS, PAYMENT_STATUS, USER_ROLES, AUDIT_ACTIONS } = require("../constants/enums");
+const {
+  PAYMENT_METHODS,
+  PAYMENT_STATUS,
+  USER_ROLES,
+  AUDIT_ACTIONS,
+  IDEMPOTENCY_OPERATIONS,
+} = require("../constants/enums");
 const ApiError = require("../utils/ApiError");
+const { ERROR_CODES } = require("../constants/errorCodes");
+const { parsePositiveRupeeInteger } = require("../utils/money");
+const { withTransaction } = require("../utils/transaction");
 const { logAudit } = require("./audit.service");
 const { parseDateRange } = require("../utils/date");
+const {
+  checkIdempotencyReplay,
+  saveIdempotencyResult,
+} = require("./idempotency.service");
+const {
+  getStaffCashInHand,
+  lockStaffCashProfile,
+  assertStaffCashInHandSufficient,
+  assertStaffUser,
+} = require("./staffCash.service");
 
-/** Mongo aggregate $match does not cast strings to ObjectId — normalize staff/user ids. */
 const toObjectId = (id, label = "id") => {
   if (id instanceof mongoose.Types.ObjectId) return id;
   if (!mongoose.Types.ObjectId.isValid(id)) {
@@ -40,20 +58,6 @@ const getStaffCashSubmitted = async (staffId) => {
   ]);
 
   return result[0]?.total || 0;
-};
-
-const getStaffCashInHand = async (staffId) => {
-  const [cashCollected, cashSubmitted] = await Promise.all([
-    getStaffCashCollected(staffId),
-    getStaffCashSubmitted(staffId),
-  ]);
-
-  return {
-    staffId,
-    cashCollected,
-    cashSubmitted,
-    cashInHand: cashCollected - cashSubmitted,
-  };
 };
 
 const getAdminCashCollected = async () => {
@@ -96,26 +100,40 @@ const getPaymentMethodBreakdown = async (filter = {}) => {
   }));
 };
 
-const getReceiptDisplayData = async (paymentId) => {
+const getTotalPaidTillNow = async (payment, session = null) => {
+  const schemeId = payment.scheme._id || payment.scheme;
+  const payments = await Payment.find({
+    scheme: schemeId,
+    status: PAYMENT_STATUS.SUCCESS,
+  })
+    .select("amount paymentDate createdAt _id")
+    .sort({ paymentDate: 1, createdAt: 1, _id: 1 })
+    .session(session || null)
+    .lean();
+
+  const currentId = String(payment._id);
+  let total = 0;
+  for (const row of payments) {
+    total += row.amount;
+    if (String(row._id) === currentId) {
+      break;
+    }
+  }
+  return total;
+};
+
+const getReceiptDisplayData = async (paymentId, session = null) => {
   const payment = await Payment.findById(paymentId)
     .populate("customer", "name passbookNumber")
     .populate("scheme", "enrollmentNumber status")
-    .populate("collectedBy", "name");
+    .populate("collectedBy", "name")
+    .session(session || null);
 
   if (!payment) {
     return null;
   }
 
-  const totalPaidTillNow = await Payment.aggregate([
-    {
-      $match: {
-        scheme: payment.scheme._id,
-        status: PAYMENT_STATUS.SUCCESS,
-        paymentDate: { $lte: payment.paymentDate },
-      },
-    },
-    { $group: { _id: null, total: { $sum: "$amount" } } },
-  ]);
+  const totalPaidTillNow = await getTotalPaidTillNow(payment, session);
 
   return {
     customerName: payment.customer.name,
@@ -126,7 +144,7 @@ const getReceiptDisplayData = async (paymentId) => {
     paymentMethod: payment.paymentMethod,
     collectedBy: payment.collectedBy.name,
     paymentDate: payment.paymentDate,
-    totalPaidTillNow: totalPaidTillNow[0]?.total || payment.amount,
+    totalPaidTillNow,
     schemeStatus: payment.scheme.status,
   };
 };
@@ -201,46 +219,106 @@ const getStaffCashSubmissionHistory = async (staffId, { from, to } = {}) => {
   return CashSubmission.find(query).sort({ submissionDate: -1 }).select("-__v");
 };
 
-const createCashSubmission = async (
-  { staff, submittedAmount, submissionDate, receivedBy, notes },
-  actor
-) => {
-  if (!submittedAmount || submittedAmount <= 0) {
-    throw new ApiError(400, "Submitted amount must be greater than zero.");
+const createCashSubmission = async (payload, actor) => {
+  const submittedAmount = parsePositiveRupeeInteger(payload.submittedAmount, "submittedAmount");
+  const submissionDate = payload.submissionDate ? new Date(payload.submissionDate) : new Date();
+  if (Number.isNaN(submissionDate.getTime())) {
+    throw new ApiError(400, "Invalid submission date.");
   }
 
-  const staffUser = await User.findById(staff);
-  if (!staffUser || staffUser.role !== USER_ROLES.STAFF) {
-    throw new ApiError(404, "Staff member not found.");
-  }
-
-  const submission = await CashSubmission.create({
-    staff,
+  const idempotencyPayload = {
+    staff: payload.staff,
     submittedAmount,
-    submissionDate: submissionDate || new Date(),
-    receivedBy: (receivedBy?.trim() || actor?.name || "Admin"),
-    notes: notes?.trim() || "",
-    createdBy: actor._id,
+    submissionDate: submissionDate.toISOString(),
+    notes: payload.notes?.trim() || "",
+  };
+
+  const txnResult = await withTransaction(async (session) => {
+    const replay = await checkIdempotencyReplay({
+      clientRequestId: payload.clientRequestId,
+      operationType: IDEMPOTENCY_OPERATIONS.CASH_SUBMISSION,
+      requestPayload: idempotencyPayload,
+      session,
+    });
+    if (replay.replay) {
+      return { replay: true, response: replay.response };
+    }
+
+    await assertStaffUser(payload.staff, session);
+    await lockStaffCashProfile(payload.staff, session);
+    await assertStaffCashInHandSufficient(payload.staff, submittedAmount, session);
+
+    const [submission] = await CashSubmission.create(
+      [
+        {
+          staff: payload.staff,
+          submittedAmount,
+          submissionDate,
+          receivedBy: actor?.name || "Admin",
+          notes: payload.notes?.trim() || "",
+          createdBy: actor._id,
+        },
+      ],
+      { session }
+    );
+
+    const cashSummary = await getStaffCashInHand(payload.staff, session);
+    if (cashSummary.cashInHand < 0) {
+      throw new ApiError(409, "Cash submission would result in negative cash in hand.", [], {
+        code: ERROR_CODES.CASH_BALANCE_CONFLICT,
+        retryable: false,
+      });
+    }
+
+    await logAudit({
+      actor: actor._id,
+      actorRole: actor.role,
+      action: AUDIT_ACTIONS.CASH_SUBMITTED,
+      targetType: "CashSubmission",
+      targetId: submission._id,
+      newValue: {
+        staff: payload.staff,
+        submittedAmount,
+        submissionDate: submission.submissionDate,
+        receivedBy: submission.receivedBy,
+        clientRequestId: payload.clientRequestId,
+      },
+      notes: payload.notes?.trim() || "Cash submission recorded",
+      session,
+    });
+
+    const response = {
+      submissionId: submission._id,
+      staffId: payload.staff,
+      cashSummary,
+    };
+
+    await saveIdempotencyResult({
+      clientRequestId: replay.clientRequestId,
+      operationType: IDEMPOTENCY_OPERATIONS.CASH_SUBMISSION,
+      requestHash: replay.requestHash,
+      responsePayload: response,
+      actor,
+      resourceType: "CashSubmission",
+      resourceId: submission._id,
+      session,
+    });
+
+    return { replay: false, submission, cashSummary };
   });
 
-  const cashSummary = await getStaffCashInHand(staff);
+  if (txnResult.replay) {
+    const submission = await CashSubmission.findById(txnResult.response.submissionId);
+    return {
+      submission,
+      cashSummary: txnResult.response.cashSummary,
+    };
+  }
 
-  await logAudit({
-    actor: actor._id,
-    actorRole: actor.role,
-    action: AUDIT_ACTIONS.CASH_SUBMITTED,
-    targetType: "CashSubmission",
-    targetId: submission._id,
-    newValue: {
-      staff,
-      submittedAmount,
-      submissionDate: submission.submissionDate,
-      receivedBy: submission.receivedBy,
-    },
-    notes: notes || "Cash submission recorded",
-  });
-
-  return { submission, cashSummary };
+  return {
+    submission: txnResult.submission,
+    cashSummary: txnResult.cashSummary,
+  };
 };
 
 const listCashSubmissions = async ({ staffId, from, to } = {}) => {
@@ -274,10 +352,10 @@ const listCashSubmissions = async ({ staffId, from, to } = {}) => {
 module.exports = {
   getStaffCashCollected,
   getStaffCashSubmitted,
-  getStaffCashInHand,
   getAdminCashCollected,
   getPaymentMethodBreakdown,
   getReceiptDisplayData,
+  getTotalPaidTillNow,
   getStaffCollectionTotal,
   getStaffPaymentHistory,
   getStaffCashSubmissionHistory,

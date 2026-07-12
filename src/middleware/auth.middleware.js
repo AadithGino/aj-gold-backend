@@ -14,6 +14,9 @@ const authMiddleware = async (req, res, next) => {
     const user = await User.findById(decoded.id);
     if (!user) throw new ApiError(401, "User not found.");
     if (user.status === "INACTIVE") throw new ApiError(403, "Account is inactive.");
+    if ((decoded.tokenVersion ?? 0) !== (user.tokenVersion || 0)) {
+      throw new ApiError(401, "Session expired. Please log in again.");
+    }
     req.user = user;
     next();
   } catch (err) {

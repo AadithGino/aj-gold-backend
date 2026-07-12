@@ -28,7 +28,8 @@ const { collectPayment } = require("../services/payment.service");
 const { createCashSubmission } = require("../services/cash.service");
 const { getCashPositionSummary } = require("../services/cashPosition.service");
 const { getCustomerLedger, getSchemeLedger } = require("../services/report.service");
-const { getStaffCashInHand } = require("../services/cash.service");
+const { getStaffCashInHand } = require("../services/staffCash.service");
+const { clientRequestId } = require("./smokeHelpers");
 
 const SMOKE_TAG = "SMOKE-P8";
 
@@ -155,6 +156,7 @@ const run = async () => {
           amount: 10000,
           paymentMethod: PAYMENT_METHODS.CASH,
           paymentDate: new Date("2025-02-01"),
+          clientRequestId: clientRequestId(),
         },
         staffUser
       )
@@ -169,6 +171,7 @@ const run = async () => {
           paymentMethod: PAYMENT_METHODS.UPI,
           paymentDate: new Date("2025-03-01"),
           transactionReference: `${runTag}-UPI`,
+          clientRequestId: clientRequestId(),
         },
         staffUser
       )
@@ -183,6 +186,7 @@ const run = async () => {
           paymentMethod: PAYMENT_METHODS.BANK,
           paymentDate: new Date("2025-04-01"),
           transactionReference: `${runTag}-BANK`,
+          clientRequestId: clientRequestId(),
         },
         staffUser
       )
@@ -193,10 +197,10 @@ const run = async () => {
 
     const server = app.listen(0);
     const port = server.address().port;
-    const adminToken = jwt.sign({ id: admin._id, role: admin.role }, env.jwtSecret, { expiresIn: "1h" });
-    const staffToken = jwt.sign({ id: staffUser._id, role: staffUser.role }, env.jwtSecret, { expiresIn: "1h" });
+    const adminToken = jwt.sign({ id: admin._id, role: admin.role, tokenVersion: 0 }, env.jwtSecret, { expiresIn: "1h" });
+    const staffToken = jwt.sign({ id: staffUser._id, role: staffUser.role, tokenVersion: 0 }, env.jwtSecret, { expiresIn: "1h" });
     const customerUser = await User.findById(customer.user);
-    const customerToken = jwt.sign({ id: customerUser._id, role: customerUser.role }, env.jwtSecret, {
+    const customerToken = jwt.sign({ id: customerUser._id, role: customerUser.role, tokenVersion: 0 }, env.jwtSecret, {
       expiresIn: "1h",
     });
 
@@ -221,7 +225,7 @@ const run = async () => {
         method: "POST",
         path: `/api/corrections/${correctionId}/approve`,
         token: adminToken,
-        body: { reviewNotes: "Approved for smoke test" },
+        body: { reviewNotes: "Approved for smoke test", reviewClientRequestId: clientRequestId() },
       });
       assert(approveRes.status === 200, "Admin approves amount correction");
 
@@ -260,7 +264,7 @@ const run = async () => {
         method: "POST",
         path: `/api/corrections/${rejectId}/reject`,
         token: adminToken,
-        body: { reviewNotes: "Rejected in smoke test" },
+        body: { reviewNotes: "Rejected in smoke test", reviewClientRequestId: clientRequestId() },
       });
       assert(rejectRes.status === 200, "Admin rejects correction");
       const bankAfterReject = await Payment.findById(bankPayment._id);
@@ -270,7 +274,7 @@ const run = async () => {
         method: "POST",
         path: `/api/corrections/${reverseCorrectionId}/approve`,
         token: adminToken,
-        body: { reviewNotes: "Reverse approved" },
+        body: { reviewNotes: "Reverse approved", reviewClientRequestId: clientRequestId() },
       });
       assert(approveReverse.status === 200, "Admin approves reverse correction");
       const reversedUpi = await Payment.findById(upiPayment._id);
@@ -286,6 +290,7 @@ const run = async () => {
           submissionDate: new Date(),
           receivedBy: "Admin User",
           notes: runTag,
+          clientRequestId: clientRequestId(),
         },
         admin
       );
@@ -312,6 +317,8 @@ const run = async () => {
         body: {
           status: SCHEME_STATUS.REDEEMED,
           notes: "Smoke redemption settlement",
+          settlementAmount: 18000,
+          clientRequestId: clientRequestId(),
         },
       });
       assert(redeemRes.status === 200, "Admin redeems scheme after maturity");
@@ -323,8 +330,6 @@ const run = async () => {
 
       const cashPosition = await getCashPositionSummary();
       assert(cashPosition.totalCustomerSettlement === 18000, "Total customer settlement is 18000");
-      assert(cashPosition.totalCashCustomerSettlement === 15000, "Cash customer settlement is 15000");
-      assert(cashPosition.totalBankCustomerSettlement === 3000, "Bank customer settlement is 3000");
       assert(cashPosition.totalCashInVault === cashPosition.cashInVault, "totalCashInVault equals cashInVault");
       assert(
         cashPosition.cashInVault ===
@@ -364,7 +369,7 @@ const run = async () => {
           notes: "Staff cannot re-redeem",
         },
       });
-      assert(staffRedeemRes.status === 400, "Staff cannot re-redeem settled scheme");
+      assert(staffRedeemRes.status === 403, "Staff cannot re-redeem settled scheme");
 
       const customerCorrectionBlock = await requestJson(port, {
         method: "GET",

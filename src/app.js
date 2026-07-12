@@ -2,6 +2,8 @@ const express = require("express");
 const cors = require("cors");
 const helmet = require("helmet");
 const morgan = require("morgan");
+const { CORS_ORIGINS, BODY_SIZE_LIMIT, NODE_ENV } = require("./config/env");
+const requestIdMiddleware = require("./middleware/requestId.middleware");
 
 const healthRoutes       = require("./routes/health.routes");
 const authRoutes         = require("./routes/auth.routes");
@@ -17,11 +19,26 @@ const { notFound, errorHandler } = require("./middleware/error.middleware");
 
 const app = express();
 
+app.use(requestIdMiddleware);
 app.use(helmet());
-app.use(cors());
-app.use(morgan("dev"));
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+app.use(
+  cors({
+    origin(origin, callback) {
+      if (!origin || CORS_ORIGINS.length === 0 || CORS_ORIGINS.includes(origin)) {
+        return callback(null, true);
+      }
+      return callback(new Error("CORS origin not allowed."));
+    },
+    credentials: true,
+  })
+);
+app.use(
+  morgan(NODE_ENV === "production" ? "combined" : "dev", {
+    skip: (req) => req.path === "/api/health",
+  })
+);
+app.use(express.json({ limit: BODY_SIZE_LIMIT }));
+app.use(express.urlencoded({ extended: true, limit: BODY_SIZE_LIMIT }));
 
 app.get("/", (req, res) => {
   res.json({ success: true, message: "AJ Gold Kambil API" });

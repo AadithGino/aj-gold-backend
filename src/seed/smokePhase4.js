@@ -20,6 +20,7 @@ const {
 } = require("../services/customer.service");
 const { createScheme, updateSchemeStatus } = require("../services/schemeManagement.service");
 const { assertCustomerCanCreateActiveScheme } = require("../services/scheme.service");
+const { clientRequestId } = require("./smokeHelpers");
 const ApiError = require("../utils/ApiError");
 
 const SMOKE_TAG = "SMOKE-P4";
@@ -155,7 +156,12 @@ const run = async () => {
 
   const redeemed = await updateSchemeStatus(
     scheme._id,
-    { status: SCHEME_STATUS.REDEEMED, notes: "Smoke redeem" },
+    {
+      status: SCHEME_STATUS.REDEEMED,
+      notes: "Smoke redeem",
+      settlementAmount: 1,
+      clientRequestId: clientRequestId(),
+    },
     admin
   );
   assert(redeemed.status === SCHEME_STATUS.REDEEMED, "Scheme status updated to REDEEMED");
@@ -171,7 +177,12 @@ const run = async () => {
   const scheme2 = await createScheme({ customerId: customer._id.toString(), startDate: new Date("2026-01-01") }, admin);
   const closed = await updateSchemeStatus(
     scheme2._id,
-    { status: SCHEME_STATUS.CLOSED, notes: "Smoke close" },
+    {
+      status: SCHEME_STATUS.CLOSED,
+      notes: "Smoke close",
+      settlementAmount: 1,
+      clientRequestId: clientRequestId(),
+    },
     admin
   );
   assert(closed.status === SCHEME_STATUS.CLOSED, "Scheme status updated to CLOEED");
