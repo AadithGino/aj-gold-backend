@@ -2,7 +2,7 @@ const DEFAULT_STAFF_PERMISSIONS = {
   canCollectPayment: true,
   canCreateCustomer: true,
   canViewReports: true,
-  canSubmitCash: true,
+  canSubmitCash: false,
   canMarkRedeemed: true,
   canMarkClosed: false,
 };
@@ -21,7 +21,7 @@ const resolveStaffPermissions = (permissions = {}) => {
     canViewReports: stored.canViewReports !== false,
     canCollectPayment: stored.canCollectPayment !== false,
     canCreateCustomer: stored.canCreateCustomer !== false,
-    canSubmitCash: stored.canSubmitCash !== false,
+    canSubmitCash: stored.canSubmitCash === true,
   };
 };
 

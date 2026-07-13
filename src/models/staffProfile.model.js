@@ -7,8 +7,8 @@ const staffProfileSchema = new mongoose.Schema(
     permissions: {
       canCollectPayment:    { type: Boolean, default: true },
       canCreateCustomer:    { type: Boolean, default: true },
-      canViewReports:       { type: Boolean, default: false },
-      canSubmitCash:        { type: Boolean, default: true },
+      canViewReports:       { type: Boolean, default: true },
+      canSubmitCash:        { type: Boolean, default: false },
       canMarkRedeemed:      { type: Boolean, default: false },
       canMarkClosed:        { type: Boolean, default: false },
     },

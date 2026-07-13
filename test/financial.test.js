@@ -678,7 +678,7 @@ describe("financial hardening", () => {
     const resolved = resolveStaffPermissions({});
     assert.equal(resolved.canViewReports, true);
     assert.equal(resolved.canMarkRedeemed, true);
-    assert.equal(resolved.canSubmitCash, true);
+    assert.equal(resolved.canSubmitCash, false);
   });
 
   it("20. staff cannot access another staff member's restricted payment or receipt", async () => {

@@ -1,7 +1,7 @@
 const { USER_ROLES } = require("../constants/enums");
 const StaffProfile = require("../models/staffProfile.model");
 const ApiError = require("../utils/ApiError");
-const { hasStaffPermission } = require("../constants/staffPermissions");
+const { resolveStaffPermissions } = require("../constants/staffPermissions");
 const asyncHandler = require("../utils/asyncHandler");
 
 const assertNotCustomer = (user) => {
@@ -20,7 +20,8 @@ const assertStaffReportAccess = async (user) => {
   assertNotCustomer(user);
   if (user.role === USER_ROLES.STAFF) {
     const profile = await StaffProfile.findOne({ user: user._id });
-    if (!hasStaffPermission(profile, "canViewReports")) {
+    const perms = resolveStaffPermissions(profile?.permissions);
+    if (!perms.canViewReports && !perms.canCollectPayment) {
       throw new ApiError(403, "Staff does not have report access.");
     }
   }

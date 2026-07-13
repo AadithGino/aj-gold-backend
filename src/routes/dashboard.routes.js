@@ -9,7 +9,6 @@ const {
   customerDashboardHandler,
   roleProfileHandler,
 } = require("../controllers/dashboard.controller");
-const { createStaffCashSubmissionHandler } = require("../controllers/staff.cashSubmission.controller");
 const ApiError = require("../utils/ApiError");
 
 const router = express.Router();
@@ -28,10 +27,6 @@ router.get("/staff",    (req, res, next) => {
 router.get("/staff/cash-submissions", (req, res, next) => {
   if (![USER_ROLES.ADMIN, USER_ROLES.STAFF].includes(req.user.role)) return next(new ApiError(403, "Staff/Admin only."));
   staffCashSubmissionsHandler(req, res, next);
-});
-router.post("/staff/cash-submissions", (req, res, next) => {
-  if (req.user.role !== USER_ROLES.STAFF) return next(new ApiError(403, "Staff only."));
-  createStaffCashSubmissionHandler(req, res, next);
 });
 router.get("/staff/redemptions", (req, res, next) => {
   if (![USER_ROLES.ADMIN, USER_ROLES.STAFF].includes(req.user.role)) return next(new ApiError(403, "Staff/Admin only."));
