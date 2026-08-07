@@ -6,7 +6,7 @@
 const base = (process.argv[2] || "http://127.0.0.1:8000").replace(/\/$/, "");
 
 const phone = `7${String(Date.now()).slice(-9)}`;
-const password = "password12";
+const password = "pass1";
 
 async function request(path, options = {}) {
   const res = await fetch(`${base}${path}`, {

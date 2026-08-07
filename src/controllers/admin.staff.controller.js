@@ -29,7 +29,7 @@ const createStaffSchema = z.object({
     .max(15, "Phone must be at most 15 digits.")
     .regex(/^\d+$/, "Phone must contain only digits."),
   email: z.string().trim().email("Invalid email.").optional().or(z.literal("")),
-  password: z.string().min(6, "Password must be at least 6 characters."),
+  password: z.string().min(4, "Password must be at least 4 characters."),
   employeeCode: z.string().trim().optional(),
   permissions: permissionsSchema.optional(),
   notes: z.string().trim().optional(),

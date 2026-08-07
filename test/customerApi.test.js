@@ -46,8 +46,8 @@ describe("customer auth and profile APIs", () => {
 
   it("password util loads without circular dependency", () => {
     assert.equal(typeof assertPasswordStrength, "function");
-    assert.throws(() => assertPasswordStrength("short"), (err) => err.statusCode === 400);
-    assertPasswordStrength("validpass1");
+    assert.throws(() => assertPasswordStrength("abc"), (err) => err.statusCode === 400);
+    assertPasswordStrength("pass1");
   });
 
   it("register creates user, customer, and returns token", async () => {
@@ -80,8 +80,8 @@ describe("customer auth and profile APIs", () => {
 
   it("register rejects short password", async () => {
     await assert.rejects(
-      () => register({ name: "A", phone: uniquePhone(), password: "short" }),
-      (err) => err.statusCode === 400 && /8 characters/.test(err.message)
+      () => register({ name: "A", phone: uniquePhone(), password: "abc" }),
+      (err) => err.statusCode === 400 && /4 characters/.test(err.message)
     );
   });
 

@@ -1,7 +1,7 @@
 const crypto = require("crypto");
 const ApiError = require("./ApiError");
 
-const MIN_PASSWORD_LENGTH = 8;
+const MIN_PASSWORD_LENGTH = 4;
 
 const assertPasswordStrength = (password) => {
   if (!password || password.length < MIN_PASSWORD_LENGTH) {

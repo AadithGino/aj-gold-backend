@@ -22,8 +22,8 @@ const seed = async () => {
     throw new Error("DEFAULT_ADMIN_PHONE and DEFAULT_ADMIN_PASSWORD are required for seed:admin.");
   }
 
-  if (password.length < 8) {
-    throw new Error("DEFAULT_ADMIN_PASSWORD must be at least 8 characters.");
+  if (password.length < 4) {
+    throw new Error("DEFAULT_ADMIN_PASSWORD must be at least 4 characters.");
   }
 
   await mongoose.connect(process.env.MONGO_URI);
