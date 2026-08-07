@@ -35,4 +35,8 @@ const paymentSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
+paymentSchema.index({ scheme: 1, status: 1, paymentDate: -1 });
+paymentSchema.index({ customer: 1, status: 1, paymentDate: -1 });
+paymentSchema.index({ collectedBy: 1, paymentMethod: 1, status: 1, paymentDate: -1 });
+
 module.exports = mongoose.model("Payment", paymentSchema);

@@ -15,7 +15,8 @@ const {
 const ApiError = require("../utils/ApiError");
 const { parseDateRange, startOfDay, endOfDay } = require("../utils/date");
 const dayjs = require("dayjs");
-const { getStaffCashInHand, getPaymentMethodBreakdown } = require("./cash.service");
+const { getPaymentMethodBreakdown } = require("./cash.service");
+const { getStaffCashInHand } = require("./staffCash.service");
 const { getCashPositionSummary } = require("./cashPosition.service");
 const { enrichScheme, getCustomerDetail, getCustomerOrThrow } = require("./customer.service");
 const { getSchemeLimitSummary } = require("./paymentLimit.service");
@@ -24,11 +25,11 @@ const mapSettlementEntry = (scheme, event, index = 0) => ({
   _id: `${scheme._id}-${event.status}-${event.changedAt || index}`,
   settlementRef: `SETTLE-${scheme.enrollmentNumber}-${index + 1}`,
   settlementType: event.status === SCHEME_STATUS.CLOSED ? "CLOSURE" : "REDEMPTION",
-  amount: scheme.totalPaid || 0,
-  settledAt: event.changedAt || scheme.updatedAt || scheme.createdAt,
-  notes: event.notes || "",
+  amount: scheme.settlement?.amount ?? 0,
+  settledAt: scheme.settlement?.settledAt || event.changedAt || scheme.updatedAt || scheme.createdAt,
+  notes: scheme.settlement?.notes || event.notes || "",
   status: event.status,
-  settledBy: event.changedBy || null,
+  settledBy: scheme.settlement?.settledBy || event.changedBy || null,
   scheme: {
     _id: scheme._id,
     enrollmentNumber: scheme.enrollmentNumber,

@@ -509,7 +509,13 @@ const run = async () => {
       phone: agent.phone,
       password: STAFF_PASSWORD,
       notes: agent.notes,
-      permissions: { canCreateCustomer: true, canCollectPayment: true },
+      permissions: {
+        canCreateCustomer: true,
+        canCollectPayment: true,
+        canViewReports: true,
+        canMarkRedeemed: true,
+        canSubmitCash: true,
+      },
     });
     staffIds[agent.key] = getStaffUserId(created);
     staffTokens[agent.key] = await login(agent.phone, STAFF_PASSWORD);

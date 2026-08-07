@@ -21,7 +21,9 @@ const {
   SCHEME_STATUS,
 } = require("../constants/enums");
 const { createStaff, listStaff, getStaffDetail } = require("../services/staff.service");
-const { createCashSubmission, getStaffCashInHand } = require("../services/cash.service");
+const { createCashSubmission } = require("../services/cash.service");
+const { getStaffCashInHand } = require("../services/staffCash.service");
+const { clientRequestId } = require("./smokeHelpers");
 const { generateReceiptNumber } = require("../services/receipt.service");
 const { calculateSchemeDates, createEnrollmentNumber } = require("../services/scheme.service");
 
@@ -143,6 +145,7 @@ const run = async () => {
       submissionDate: new Date(),
       receivedBy: "Admin User",
       notes: SMOKE_TAG,
+      clientRequestId: clientRequestId(),
     },
     admin
   );

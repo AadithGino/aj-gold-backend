@@ -12,4 +12,6 @@ const cashSubmissionSchema = new mongoose.Schema(
   { timestamps: { createdAt: true, updatedAt: false } }
 );
 
+cashSubmissionSchema.index({ staff: 1, submissionDate: -1 });
+
 module.exports = mongoose.model("CashSubmission", cashSubmissionSchema);

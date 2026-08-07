@@ -1,6 +1,19 @@
 const mongoose = require("mongoose");
 const { SCHEME_STATUS } = require("../constants/enums");
 
+const settlementSchema = new mongoose.Schema(
+  {
+    amount: { type: Number, required: true, min: 0 },
+    settledAt: { type: Date, required: true },
+    settledBy: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
+    notes: { type: String, trim: true, default: "" },
+    clientRequestId: { type: String, trim: true, default: "" },
+    overrideReason: { type: String, trim: true, default: "" },
+    totalPaidAtSettlement: { type: Number, min: 0 },
+  },
+  { _id: false }
+);
+
 const statusHistorySchema = new mongoose.Schema(
   {
     status: { type: String, required: true },
@@ -27,6 +40,8 @@ const schemeSchema = new mongoose.Schema(
       index: true,
     },
     statusHistory: [statusHistorySchema],
+    settlement: settlementSchema,
+    financialVersion: { type: Number, default: 0 },
     createdBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
     updatedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
   },
@@ -35,5 +50,6 @@ const schemeSchema = new mongoose.Schema(
 
 schemeSchema.index({ maturityDate: 1 });
 schemeSchema.index({ customer: 1, status: 1 });
+schemeSchema.index({ status: 1, "settlement.settledAt": -1 });
 
 module.exports = mongoose.model("Scheme", schemeSchema);

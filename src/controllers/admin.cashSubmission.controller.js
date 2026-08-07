@@ -1,14 +1,7 @@
-const { z } = require("zod");
 const { createCashSubmission, listCashSubmissions } = require("../services/cash.service");
 const ApiError = require("../utils/ApiError");
 const asyncHandler = require("../utils/asyncHandler");
-
-const createCashSubmissionSchema = z.object({
-  staff: z.string().min(1, "Staff is required."),
-  submittedAmount: z.coerce.number().positive("Submitted amount must be greater than zero."),
-  submissionDate: z.coerce.date().optional(),
-  notes: z.string().trim().optional(),
-});
+const { cashSubmissionSchema } = require("../validation/financial.validation");
 
 const parseBody = (schema, body) => {
   const parsed = schema.safeParse(body);
@@ -19,7 +12,7 @@ const parseBody = (schema, body) => {
 };
 
 const createCashSubmissionHandler = asyncHandler(async (req, res) => {
-  const payload = parseBody(createCashSubmissionSchema, req.body);
+  const payload = parseBody(cashSubmissionSchema, req.body);
   const { submission, cashSummary } = await createCashSubmission(payload, req.user);
 
   return res.status(201).json({

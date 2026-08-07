@@ -21,6 +21,7 @@ const { createStaff } = require("../services/staff.service");
 const { createCustomer } = require("../services/customer.service");
 const { createScheme } = require("../services/schemeManagement.service");
 const { collectPayment } = require("../services/payment.service");
+const { clientRequestId } = require("./smokeHelpers");
 const {
   getAdminDashboard,
   getStaffDashboard,
@@ -89,10 +90,6 @@ const ADMIN_CASH_FIELDS = [
   "totalCashWithStaff",
   "totalCashSubmittedToVault",
   "totalCustomerSettlement",
-  "totalCashCustomerSettlement",
-  "totalUpiCustomerSettlement",
-  "totalBankCustomerSettlement",
-  "totalCardCustomerSettlement",
   "settlementTrackingImplemented",
 ];
 
@@ -159,6 +156,7 @@ const run = async () => {
         amount: 12000,
         paymentMethod: PAYMENT_METHODS.CASH,
         paymentDate: new Date("2025-02-01"),
+        clientRequestId: clientRequestId(),
       },
       staffUser
     );

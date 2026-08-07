@@ -9,6 +9,7 @@ const userSchema = new mongoose.Schema(
     passwordHash: { type: String, required: true, select: false },
     role:     { type: String, enum: Object.values(USER_ROLES), required: true, index: true },
     status:   { type: String, enum: Object.values(USER_STATUS), default: USER_STATUS.ACTIVE, index: true },
+    tokenVersion: { type: Number, default: 0 },
     lastLoginAt: { type: Date },
     createdBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
     updatedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },

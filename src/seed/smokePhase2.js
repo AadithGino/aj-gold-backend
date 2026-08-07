@@ -31,7 +31,8 @@ const {
   getSchemeLimitSummary,
   willNewPaymentExceedLimit,
 } = require("../services/paymentLimit.service");
-const { getStaffCashInHand, getPaymentMethodBreakdown, getReceiptDisplayData } = require("../services/cash.service");
+const { getPaymentMethodBreakdown, getReceiptDisplayData } = require("../services/cash.service");
+const { getStaffCashInHand } = require("../services/staffCash.service");
 const { generateReceiptNumber } = require("../services/receipt.service");
 const { logAudit } = require("../services/audit.service");
 const { createStaff } = require("../services/staff.service");

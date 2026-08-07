@@ -15,6 +15,10 @@ const ApiError = require("../utils/ApiError");
 const { getNextSequence, generatePassbookNumber } = require("./receipt.service");
 const { logAudit } = require("./audit.service");
 const { getSchemeLimitSummary } = require("./paymentLimit.service");
+const {
+  assertPasswordStrength,
+  generateTemporaryPassword,
+} = require("./auth.service");
 
 const getId = (value) => (value && typeof value === "object" ? value._id || null : value || null);
 const normalizeActor = (actor) => {
@@ -129,6 +133,16 @@ const enrichScheme = async (scheme) => {
     firstSixMonthsPaid: limitSummary.firstSixMonthsPaid,
     afterSixMonthsPaid: limitSummary.afterSixMonthsPaid,
     remainingAllowedPayment: limitSummary.remainingAllowedPayment,
+    settlement: scheme.settlement
+      ? {
+          amount: scheme.settlement.amount,
+          settledAt: scheme.settlement.settledAt,
+          settledBy: scheme.settlement.settledBy,
+          notes: scheme.settlement.notes || "",
+          overrideReason: scheme.settlement.overrideReason || "",
+          totalPaidAtSettlement: scheme.settlement.totalPaidAtSettlement,
+        }
+      : null,
     progress,
     createdAt: scheme.createdAt,
     updatedAt: scheme.updatedAt,
@@ -162,7 +176,11 @@ const createCustomer = async (payload, actor) => {
     throw new ApiError(409, "Phone number is already registered.");
   }
 
-  const initialPassword = payload.password || passbookNumber;
+  const initialPassword = payload.password?.trim() || passbookNumber;
+  const temporaryPasswordReturned = payload.password?.trim() ? null : initialPassword;
+  if (payload.password?.trim()) {
+    assertPasswordStrength(initialPassword);
+  }
   const passwordHash = await bcrypt.hash(initialPassword, 10);
   const customerCode = await generateCustomerCode();
 
@@ -224,7 +242,10 @@ const createCustomer = async (payload, actor) => {
       notes: "Customer created",
     });
 
-    return sanitizeCustomer(customer);
+    return {
+      ...sanitizeCustomer(customer),
+      ...(temporaryPasswordReturned ? { temporaryPassword: temporaryPasswordReturned } : {}),
+    };
   } catch (error) {
     await session.abortTransaction();
     throw error;
@@ -247,9 +268,10 @@ const registerCustomer = async (payload) => {
   if (!/^\d{10}$/.test(phone)) {
     throw new ApiError(400, "Phone number must be a 10-digit mobile number.");
   }
-  if (!password || String(password).length < 6) {
-    throw new ApiError(400, "Password must be at least 6 characters.");
+  if (!password) {
+    throw new ApiError(400, "Password is required.");
   }
+  assertPasswordStrength(String(password));
 
   const passbookNumber = await generatePassbookNumber();
 
@@ -418,8 +440,10 @@ const resetCustomerPassword = async (customerId, newPassword, actor) => {
     throw new ApiError(400, "Customer login user is not linked.");
   }
 
-  const passwordToSet = newPassword?.trim() || customer.passbookNumber;
+  const passwordToSet = newPassword?.trim() || generateTemporaryPassword();
+  assertPasswordStrength(passwordToSet);
   const passwordHash = await bcrypt.hash(passwordToSet, 10);
+  const temporaryPasswordReturned = newPassword?.trim() ? null : passwordToSet;
 
   await User.findByIdAndUpdate(customer.user, {
     passwordHash,
@@ -435,7 +459,10 @@ const resetCustomerPassword = async (customerId, newPassword, actor) => {
     notes: "Customer password reset",
   });
 
-  return { success: true };
+  return {
+    success: true,
+    ...(temporaryPasswordReturned ? { temporaryPassword: temporaryPasswordReturned } : {}),
+  };
 };
 
 const searchCustomers = async (search = "") => {

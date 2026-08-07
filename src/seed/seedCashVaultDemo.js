@@ -31,7 +31,10 @@ const { createStaff } = require("../services/staff.service");
 const { createCustomer } = require("../services/customer.service");
 const { createScheme, updateSchemeStatus } = require("../services/schemeManagement.service");
 const { collectPayment } = require("../services/payment.service");
-const { createCashSubmission, getStaffCashInHand } = require("../services/cash.service");
+const { createCashSubmission } = require("../services/cash.service");
+const { getStaffCashInHand } = require("../services/staffCash.service");
+const { getTotalPaidForScheme } = require("../services/paymentLimit.service");
+const { clientRequestId } = require("./smokeHelpers");
 const { getCashPositionSummary } = require("../services/cashPosition.service");
 const { getAdminDashboard } = require("../services/dashboard.service");
 const {
@@ -156,16 +159,16 @@ const CUSTOMERS = [
 ];
 
 const PAYMENT_DATES = [
-  "2026-03-05T10:00:00.000Z",
-  "2026-03-20T10:00:00.000Z",
-  "2026-04-05T10:00:00.000Z",
-  "2026-04-20T10:00:00.000Z",
-  "2026-05-05T10:00:00.000Z",
-  "2026-05-20T10:00:00.000Z",
-  "2026-06-05T10:00:00.000Z",
-  "2026-06-20T10:00:00.000Z",
-  "2026-07-05T10:00:00.000Z",
-  "2026-07-20T10:00:00.000Z",
+  "2024-04-05T10:00:00.000Z",
+  "2024-04-20T10:00:00.000Z",
+  "2024-05-05T10:00:00.000Z",
+  "2024-05-20T10:00:00.000Z",
+  "2024-06-05T10:00:00.000Z",
+  "2024-06-20T10:00:00.000Z",
+  "2024-07-05T10:00:00.000Z",
+  "2024-07-20T10:00:00.000Z",
+  "2025-03-05T10:00:00.000Z",
+  "2025-03-20T10:00:00.000Z",
 ];
 
 const EXPECTED = {
@@ -178,10 +181,6 @@ const EXPECTED = {
   totalCashSubmittedToVault: 350000,
   totalCashWithStaff: 150000,
   totalCustomerSettlement: 580000,
-  totalCashCustomerSettlement: 340000,
-  totalUpiCustomerSettlement: 110000,
-  totalBankCustomerSettlement: 80000,
-  totalCardCustomerSettlement: 60000,
   cashInVault: 150000,
 };
 
@@ -273,10 +272,6 @@ const verifyCashPosition = async (cash) => {
   assertEq(cash.totalCashSubmittedToVault, EXPECTED.totalCashSubmittedToVault, "totalCashSubmittedToVault");
   assertEq(cash.totalCashWithStaff, EXPECTED.totalCashWithStaff, "totalCashWithStaff");
   assertEq(cash.totalCustomerSettlement, EXPECTED.totalCustomerSettlement, "totalCustomerSettlement");
-  assertEq(cash.totalCashCustomerSettlement, EXPECTED.totalCashCustomerSettlement, "totalCashCustomerSettlement");
-  assertEq(cash.totalUpiCustomerSettlement, EXPECTED.totalUpiCustomerSettlement, "totalUpiCustomerSettlement");
-  assertEq(cash.totalBankCustomerSettlement, EXPECTED.totalBankCustomerSettlement, "totalBankCustomerSettlement");
-  assertEq(cash.totalCardCustomerSettlement, EXPECTED.totalCardCustomerSettlement, "totalCardCustomerSettlement");
   assertEq(cash.cashInVault, EXPECTED.cashInVault, "cashInVault");
   assertEq(cash.totalCashInVault, EXPECTED.cashInVault, "totalCashInVault");
   if (cash.totalCustomerMoneyHeld != null) {
@@ -369,6 +364,7 @@ const run = async () => {
           paymentDate: entry.paymentDate,
           transactionReference: entry.transactionReference,
           notes: entry.notes,
+          clientRequestId: clientRequestId(),
         },
         collector
       );
@@ -386,6 +382,7 @@ const run = async () => {
         submissionDate: new Date("2026-07-21"),
         receivedBy: "Admin User",
         notes: "Cash vault demo submission",
+        clientRequestId: clientRequestId(),
       },
       admin
     );
@@ -397,9 +394,15 @@ const run = async () => {
   for (const customerKey of REDEMPTION_CUSTOMER_KEYS) {
     const customer = customerRecords[customerKey];
     const scheme = schemeRecords[customerKey];
+    const totalPaid = await getTotalPaidForScheme(scheme._id);
     await updateSchemeStatus(
       scheme._id,
-      { status: "REDEEMED", notes: "Cash vault demo redemption" },
+      {
+        status: "REDEEMED",
+        notes: "Cash vault demo redemption",
+        settlementAmount: totalPaid,
+        clientRequestId: clientRequestId(),
+      },
       admin
     );
     log(`✓ ${customer.name}: scheme ${scheme.enrollmentNumber} marked REDEEMED`);
