@@ -1,9 +1,18 @@
-const { login, me } = require("../services/auth.service");
+const { login, register, me } = require("../services/auth.service");
 
 const loginController = async (req, res, next) => {
   try {
     const result = await login(req.body);
     res.json({ success: true, data: result });
+  } catch (err) {
+    next(err);
+  }
+};
+
+const registerController = async (req, res, next) => {
+  try {
+    const result = await register(req.body);
+    res.status(201).json({ success: true, data: result });
   } catch (err) {
     next(err);
   }
@@ -22,4 +31,4 @@ const logoutController = async (req, res) => {
   res.json({ success: true, message: "Logged out successfully." });
 };
 
-module.exports = { loginController, meController, logoutController };
+module.exports = { loginController, registerController, meController, logoutController };

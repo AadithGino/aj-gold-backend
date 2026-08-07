@@ -1,6 +1,7 @@
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const User = require("../models/user.model");
+const { registerCustomer } = require("./customer.service");
 const { logAudit } = require("./audit.service");
 const ApiError = require("../utils/ApiError");
 const { JWT_SECRET, JWT_EXPIRES_IN } = require("../config/env");
@@ -41,6 +42,27 @@ const login = async ({ phone, password }) => {
   };
 };
 
+const register = async (payload) => {
+  const { user, customer } = await registerCustomer(payload);
+
+  const token = jwt.sign({ id: user._id, role: user.role }, JWT_SECRET, { expiresIn: JWT_EXPIRES_IN });
+
+  await logAudit({
+    actor: user._id,
+    actorRole: user.role,
+    action: AUDIT_ACTIONS.LOGIN,
+    targetType: "User",
+    targetId: user._id,
+    notes: "Customer registered and signed in",
+  });
+
+  return {
+    token,
+    user: { _id: user._id, name: user.name, phone: user.phone, role: user.role, status: user.status },
+    customer,
+  };
+};
+
 const me = async (user) => ({
   user: {
     _id: user._id,
@@ -51,4 +73,4 @@ const me = async (user) => ({
   },
 });
 
-module.exports = { login, me };
+module.exports = { login, register, me };

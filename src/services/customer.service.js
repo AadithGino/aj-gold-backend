@@ -233,6 +233,107 @@ const createCustomer = async (payload, actor) => {
   }
 };
 
+const registerCustomer = async (payload) => {
+  const name = payload.name?.trim();
+  const phone = payload.phone?.trim();
+  const password = payload.password;
+
+  if (!name) {
+    throw new ApiError(400, "Name is required.");
+  }
+  if (!phone) {
+    throw new ApiError(400, "Phone number is required.");
+  }
+  if (!/^\d{10}$/.test(phone)) {
+    throw new ApiError(400, "Phone number must be a 10-digit mobile number.");
+  }
+  if (!password || String(password).length < 6) {
+    throw new ApiError(400, "Password must be at least 6 characters.");
+  }
+
+  const passbookNumber = await generatePassbookNumber();
+
+  const existingPassbook = await Customer.findOne({ passbookNumber });
+  if (existingPassbook) {
+    throw new ApiError(409, "Passbook number already exists.");
+  }
+
+  const existingPhone = await User.findOne({ phone });
+  if (existingPhone) {
+    throw new ApiError(409, "Phone number is already registered.");
+  }
+
+  const passwordHash = await bcrypt.hash(String(password), 10);
+  const customerCode = await generateCustomerCode();
+
+  const session = await mongoose.startSession();
+  session.startTransaction();
+
+  try {
+    const [user] = await User.create(
+      [
+        {
+          name,
+          phone,
+          passwordHash,
+          role: USER_ROLES.CUSTOMER,
+          status: USER_STATUS.ACTIVE,
+        },
+      ],
+      { session }
+    );
+
+    const [customer] = await Customer.create(
+      [
+        {
+          user: user._id,
+          customerCode,
+          passbookNumber,
+          name,
+          phone,
+          address: payload.address?.trim() || "",
+          nominee: {
+            name: payload.nominee?.name?.trim() || "",
+            phone: payload.nominee?.phone?.trim() || "",
+            relationship: payload.nominee?.relationship?.trim() || "",
+            address: payload.nominee?.address?.trim() || "",
+          },
+          status: USER_STATUS.ACTIVE,
+          createdBy: user._id,
+          updatedBy: user._id,
+        },
+      ],
+      { session }
+    );
+
+    await session.commitTransaction();
+
+    await logAudit({
+      actor: user._id,
+      actorRole: user.role,
+      action: AUDIT_ACTIONS.CUSTOMER_CREATED,
+      targetType: "Customer",
+      targetId: customer._id,
+      newValue: {
+        passbookNumber: customer.passbookNumber,
+        name: customer.name,
+        phone: customer.phone,
+      },
+      notes: "Customer self-registered",
+    });
+
+    return {
+      user,
+      customer: sanitizeCustomer(customer),
+    };
+  } catch (error) {
+    await session.abortTransaction();
+    throw error;
+  } finally {
+    session.endSession();
+  }
+};
+
 const updateCustomer = async (customerId, payload, actor) => {
   const customer = await getCustomerOrThrow(customerId);
   const previousValue = sanitizeCustomer(customer);
@@ -488,6 +589,7 @@ const getCustomerSchemes = async (customerId) => {
 module.exports = {
   sanitizeCustomer,
   createCustomer,
+  registerCustomer,
   updateCustomer,
   resetCustomerPassword,
   searchCustomers,
