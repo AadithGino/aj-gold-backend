@@ -18,7 +18,7 @@ const { getSchemeLimitSummary } = require("./paymentLimit.service");
 const {
   assertPasswordStrength,
   generateTemporaryPassword,
-} = require("./auth.service");
+} = require("../utils/password");
 
 const getId = (value) => (value && typeof value === "object" ? value._id || null : value || null);
 const normalizeActor = (actor) => {

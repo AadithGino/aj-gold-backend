@@ -1,23 +1,16 @@
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
-const crypto = require("crypto");
 const User = require("../models/user.model");
 const { registerCustomer } = require("./customer.service");
 const { logAudit } = require("./audit.service");
 const ApiError = require("../utils/ApiError");
 const { JWT_SECRET, JWT_EXPIRES_IN } = require("../config/env");
 const { AUDIT_ACTIONS } = require("../constants/enums");
-
-const MIN_PASSWORD_LENGTH = 8;
-
-const assertPasswordStrength = (password) => {
-  if (!password || password.length < MIN_PASSWORD_LENGTH) {
-    throw new ApiError(400, `Password must be at least ${MIN_PASSWORD_LENGTH} characters.`);
-  }
-};
-
-const generateTemporaryPassword = () =>
-  crypto.randomBytes(9).toString("base64url").slice(0, 12);
+const {
+  MIN_PASSWORD_LENGTH,
+  assertPasswordStrength,
+  generateTemporaryPassword,
+} = require("../utils/password");
 
 const signUserToken = (user) => {
   const tokenVersion = user.tokenVersion || 0;
