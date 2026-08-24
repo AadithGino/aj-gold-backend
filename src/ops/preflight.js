@@ -50,6 +50,43 @@ const runStartupPreflight = async ({ requireMigrations = true } = {}) => {
   if (requireMigrations) {
     await withTimeout(verifyMigrationsApplied(db), "Migration verify");
     await withTimeout(verifyRequiredIndexes(db), "Index verify");
+
+    const legacyWorkflowRows = await db
+      .collection("schemes")
+      .find({
+        status: "ACTIVE",
+        "settlementWorkflow.status": {
+          $in: ["REQUESTED", "APPROVED", "PAYOUT_PENDING", "PAID"],
+        },
+      })
+      .project({ _id: 1, settlementWorkflow: 1 })
+      .toArray();
+    if (legacyWorkflowRows.length > 0) {
+      const now = new Date();
+      const ambiguous = db.collection("journal_migration_ambiguous");
+      for (const row of legacyWorkflowRows) {
+        await ambiguous.updateOne(
+          {
+            schemeId: row._id,
+            migrationId: "phase2_settlement_workflow_resolution",
+            resolved: { $ne: true },
+          },
+          {
+            $set: {
+              schemeId: row._id,
+              migrationId: "phase2_settlement_workflow_resolution",
+              reason: "Legacy settlement workflow in intermediate state requires explicit operator resolution.",
+              workflowStatus: row.settlementWorkflow?.status || "",
+              workflowSnapshot: row.settlementWorkflow || null,
+              resolved: false,
+              recordedAt: now,
+            },
+          },
+          { upsert: true }
+        );
+      }
+    }
+
     const unresolvedAmbiguous = await db
       .collection("journal_migration_ambiguous")
       .countDocuments({ resolved: { $ne: true } });

@@ -229,10 +229,10 @@ const scanIntegrity = async ({ db, offset = 0, limit = DEFAULT_FINDING_LIMIT } =
     status: SCHEME_STATUS.ACTIVE,
     "settlementWorkflow.status": {
       $in: [
-        SETTLEMENT_WORKFLOW_STATUS.REQUESTED,
-        SETTLEMENT_WORKFLOW_STATUS.APPROVED,
-        SETTLEMENT_WORKFLOW_STATUS.PAYOUT_PENDING,
-        SETTLEMENT_WORKFLOW_STATUS.PAID,
+        "REQUESTED",
+        "APPROVED",
+        "PAYOUT_PENDING",
+        "PAID",
       ],
     },
   });

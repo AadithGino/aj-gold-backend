@@ -210,9 +210,6 @@ const getEventTypeTotal = async (eventType, session = null) => {
 const getSettlementPaidTotal = async (session = null) =>
   getEventTypeTotal(JOURNAL_EVENT_TYPES.SETTLEMENT_PAID, session);
 
-const getSettlementAuthorizedTotal = async (session = null) =>
-  getEventTypeTotal(JOURNAL_EVENT_TYPES.SETTLEMENT_AUTHORIZED, session);
-
 const assertJournalImmutable = () => {
   throw new ApiError(409, "Financial journal entries are immutable.", [], {
     code: ERROR_CODES.JOURNAL_ENTRY_IMMUTABLE,
@@ -227,6 +224,5 @@ module.exports = {
   getStaffCustodyBalance,
   getEventTypeTotal,
   getSettlementPaidTotal,
-  getSettlementAuthorizedTotal,
   assertJournalImmutable,
 };

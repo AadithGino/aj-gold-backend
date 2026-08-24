@@ -1,13 +1,10 @@
-const mongoose = require("mongoose");
 const User = require("../models/user.model");
-const Scheme = require("../models/scheme.model");
 const { JOURNAL_ACCOUNTS } = require("../constants/journalAccounts");
-const { JOURNAL_EVENT_TYPES, USER_ROLES, SETTLEMENT_WORKFLOW_STATUS } = require("../constants/enums");
+const { JOURNAL_EVENT_TYPES, USER_ROLES } = require("../constants/enums");
 const {
   getJournalAccountBalance,
   getStaffCustodyBalance,
   getSettlementPaidTotal,
-  getSettlementAuthorizedTotal,
   getEventTypeTotal,
 } = require("./financialJournal.service");
 const { getStaffCashInHand } = require("./staffCash.service");
@@ -17,7 +14,6 @@ const buildReconciliationSummary = async () => {
     customerLiability,
     vaultBalance,
     settlementPaid,
-    settlementAuthorized,
     collectionReceived,
     collectionReversed,
     staffCashSubmitted,
@@ -26,7 +22,6 @@ const buildReconciliationSummary = async () => {
     getJournalAccountBalance(JOURNAL_ACCOUNTS.CUSTOMER_SCHEME_LIABILITY),
     getJournalAccountBalance(JOURNAL_ACCOUNTS.VAULT),
     getSettlementPaidTotal(),
-    getSettlementAuthorizedTotal(),
     getEventTypeTotal(JOURNAL_EVENT_TYPES.COLLECTION_RECEIVED),
     getEventTypeTotal(JOURNAL_EVENT_TYPES.COLLECTION_REVERSAL),
     getEventTypeTotal(JOURNAL_EVENT_TYPES.STAFF_CASH_SUBMITTED),
@@ -85,12 +80,6 @@ const buildReconciliationSummary = async () => {
     }
   }
 
-  const authorizedNotPaidSchemes = await Scheme.countDocuments({
-    "settlementWorkflow.status": {
-      $in: [SETTLEMENT_WORKFLOW_STATUS.APPROVED, SETTLEMENT_WORKFLOW_STATUS.PAYOUT_PENDING],
-    },
-  });
-
   return {
     accounts: {
       customerSchemeLiability: customerLiability,
@@ -104,16 +93,13 @@ const buildReconciliationSummary = async () => {
       netCustomerCollected,
       staffCashSubmitted,
       vaultAdjustments,
-      settlementAuthorized,
       settlementPaid,
-      authorizedNotPaidSchemes,
     },
     liquidPosition,
     equation: {
       netCustomerCollected,
       customerSchemeLiability: customerLiability,
       settlementPaid,
-      settlementAuthorized,
       vaultPlusStaffCustody: liquidPosition,
       balanced: exceptions.length === 0,
     },

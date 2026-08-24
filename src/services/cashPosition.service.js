@@ -30,6 +30,8 @@ const getCashPositionSummary = async () => {
   const totalCashWithStaff = accounts.totalStaffCustody;
   const cashInVault = accounts.vault;
   const totalCustomerSettlement = flows.settlementPaid;
+  const settlementAuthorizedNotPaid = 0;
+  const authorizedNotPaidSchemes = 0;
 
   return {
     cashInVault,
@@ -44,7 +46,7 @@ const getCashPositionSummary = async () => {
     totalCashSubmittedToVault: flows.staffCashSubmitted,
     totalAdminCashCollected: null,
     totalCustomerSettlement,
-    settlementAuthorizedNotPaid: flows.settlementAuthorized,
+    settlementAuthorizedNotPaid,
     settlementTrackingImplemented: true,
     journalBacked: true,
     cashPosition: {
@@ -52,7 +54,7 @@ const getCashPositionSummary = async () => {
       totalCashWithStaff,
       totalCashSubmittedToVault: flows.staffCashSubmitted,
       totalCustomerSettlement,
-      settlementAuthorizedNotPaid: flows.settlementAuthorized,
+      settlementAuthorizedNotPaid,
       liquidPosition,
     },
     collectionBreakdown: {
@@ -62,8 +64,8 @@ const getCashPositionSummary = async () => {
     },
     settlementBreakdown: {
       totalCustomerSettlement,
-      settlementAuthorized: flows.settlementAuthorized,
-      authorizedNotPaidSchemes: flows.authorizedNotPaidSchemes,
+      settlementAuthorized: settlementAuthorizedNotPaid,
+      authorizedNotPaidSchemes,
     },
     accounts: {
       customerSchemeLiability: accounts.customerSchemeLiability,

@@ -194,6 +194,7 @@ const enrichScheme = async (scheme) => {
           totalPaidAtSettlement: scheme.settlement.totalPaidAtSettlement,
           payoutMethod: scheme.settlement.payoutMethod || "",
           payoutReference: scheme.settlement.payoutReference || "",
+          payoutEvidence: scheme.settlement.payoutEvidence || null,
           settlementReceiptId: scheme.settlement.settlementReceiptId || "",
           settlementCategory: scheme.settlement.settlementCategory || "",
         }

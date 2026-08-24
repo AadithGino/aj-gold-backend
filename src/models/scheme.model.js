@@ -13,6 +13,7 @@ const settlementSchema = new mongoose.Schema(
     totalPaidAtSettlement: { type: Number, min: 0 },
     payoutMethod: { type: String, trim: true, default: "" },
     payoutReference: { type: String, trim: true, default: "" },
+    payoutEvidence: { type: mongoose.Schema.Types.Mixed, default: null },
     settlementReceiptId: { type: String, trim: true, default: "" },
     settlementCategory: { type: String, trim: true, default: "" },
   },

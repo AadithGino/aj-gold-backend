@@ -271,6 +271,32 @@ describe("Corrective Phase 1 — owner-approved settlement contract", () => {
     });
   }
 
+  for (const method of ALLOWED_SETTLEMENT_PAYOUT_METHODS) {
+    it(`${method} settlement succeeds without notes, reference, and evidence`, async () => {
+      const admin = await createAdmin();
+      const { customer, scheme } = await seedCustomerScheme(admin);
+      await pay(customer, scheme, admin, 2600);
+
+      const settled = await withMockedNow(maturityTime(), () =>
+        updateSchemeStatus(
+          scheme._id,
+          settlePayload({
+            payoutMethod: method,
+            payoutReference: undefined,
+            notes: undefined,
+            payoutEvidence: undefined,
+          }),
+          admin
+        )
+      );
+      assert.equal(settled.settlement.amount, 2600);
+      assert.equal(settled.settlement.notes, "");
+      assert.equal(settled.settlement.payoutMethod, method);
+      assert.equal(settled.settlement.payoutReference, "");
+      assert.equal(settled.settlement.payoutEvidence, null);
+    });
+  }
+
   it("rejects CARD and other non-settlement payout methods", async () => {
     const admin = await createAdmin();
     const { customer, scheme } = await seedCustomerScheme(admin);
@@ -298,6 +324,9 @@ describe("Corrective Phase 1 — owner-approved settlement contract", () => {
     );
     assert.equal(settled.settlementWorkflow.status, SETTLEMENT_WORKFLOW_STATUS.FINALIZED);
     assert.equal(settled.settlement.amount, 3300);
+    assert.equal(settled.settlementWorkflow.requestedBy, undefined);
+    assert.equal(settled.settlementWorkflow.approvedBy, undefined);
+    assert.equal(settled.settlementWorkflow.paidBy, undefined);
   });
 
   it("staff with settlement permission succeeds; staff without permission fails", async () => {
@@ -426,5 +455,19 @@ describe("Corrective Phase 1 — owner-approved settlement contract", () => {
     );
     assert.equal(settled.schemeName, "Making Charge Benefit Scheme — 15% off jewellery");
     assert.equal(settled.settlement.amount, 7500);
+  });
+
+  it("does not write settlement authorization self-debit/self-credit journal entries", async () => {
+    const admin = await createAdmin();
+    const { customer, scheme } = await seedCustomerScheme(admin);
+    await pay(customer, scheme, admin, 2500);
+
+    await withMockedNow(maturityTime(), () => updateSchemeStatus(scheme._id, settlePayload(), admin));
+
+    const authorizedEntries = await FinancialJournal.find({
+      scheme: scheme._id,
+      eventType: "SETTLEMENT_AUTHORIZED",
+    });
+    assert.equal(authorizedEntries.length, 0);
   });
 });

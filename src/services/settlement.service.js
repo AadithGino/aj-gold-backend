@@ -1,4 +1,5 @@
 const Scheme = require("../models/scheme.model");
+const mongoose = require("mongoose");
 const StaffProfile = require("../models/staffProfile.model");
 const {
   SCHEME_STATUS,
@@ -36,14 +37,11 @@ const auditActionForStatus = {
   [SCHEME_STATUS.CLOSED]: AUDIT_ACTIONS.SCHEME_CLOSED,
 };
 
-const plainWorkflow = (workflow) =>
-  workflow?.toObject ? workflow.toObject() : { ...(workflow || {}) };
-
-const LOCKED_WORKFLOW_STATUSES = new Set([
-  SETTLEMENT_WORKFLOW_STATUS.APPROVED,
-  SETTLEMENT_WORKFLOW_STATUS.PAYOUT_PENDING,
-  SETTLEMENT_WORKFLOW_STATUS.PAID,
-  SETTLEMENT_WORKFLOW_STATUS.FINALIZED,
+const LEGACY_INTERMEDIATE_STATUSES = new Set([
+  "REQUESTED",
+  "APPROVED",
+  "PAYOUT_PENDING",
+  "PAID",
 ]);
 
 const assertSettlementActorAllowed = async (actor, settlementType) => {
@@ -88,6 +86,16 @@ const assertPayoutPayload = (payload) => {
 const settlementCategoryForType = (settlementType) =>
   settlementType === SCHEME_STATUS.CLOSED ? "early_closure" : "maturity";
 
+const normalizeEvidence = (evidence) => {
+  if (!evidence) return null;
+  const objectRef = evidence.objectRef?.trim();
+  const checksum = evidence.checksum?.trim();
+  if (!objectRef || !checksum) {
+    throw new ApiError(400, "payoutEvidence must include objectRef and checksum when provided.");
+  }
+  return { objectRef, checksum };
+};
+
 const assertSettlementEligibility = (scheme, settlementType) => {
   const now = new Date();
   if (settlementType === SCHEME_STATUS.REDEEMED && now < new Date(scheme.maturityDate)) {
@@ -110,6 +118,37 @@ const assertSettlementEligibility = (scheme, settlementType) => {
   }
 };
 
+const ensureNoLegacyIntermediateWorkflow = async (scheme, session) => {
+  const workflowStatus = scheme?.settlementWorkflow?.status;
+  if (!workflowStatus || !LEGACY_INTERMEDIATE_STATUSES.has(workflowStatus)) {
+    return;
+  }
+
+  const row = {
+    schemeId: new mongoose.Types.ObjectId(String(scheme._id)),
+    reason: "Legacy settlement workflow in intermediate state requires explicit operator resolution.",
+    workflowStatus,
+    workflowSnapshot: scheme.settlementWorkflow,
+    migrationId: "phase2_settlement_workflow_resolution",
+    resolved: false,
+    recordedAt: new Date(),
+  };
+  await mongoose.connection.db.collection("journal_migration_ambiguous").updateOne(
+    {
+      schemeId: row.schemeId,
+      migrationId: row.migrationId,
+      resolved: { $ne: true },
+    },
+    { $set: row },
+    { upsert: true, session }
+  );
+
+  throw new ApiError(409, "Legacy settlement workflow requires manual resolution before settlement.", [], {
+    code: ERROR_CODES.SETTLEMENT_INVALID_STATE,
+    retryable: false,
+  });
+};
+
 const writeSettlementJournalEntries = async ({
   scheme,
   customerId,
@@ -121,6 +160,7 @@ const writeSettlementJournalEntries = async ({
 }) => {
   const journalEntryIds = [];
   const baseKey = `scheme:${scheme._id}`;
+  const now = new Date();
 
   const entitlementEntry = await appendJournalEntry(
     {
@@ -136,7 +176,7 @@ const writeSettlementJournalEntries = async ({
       actor: actor._id,
       actorRole: actor.role,
       clientRequestId,
-      effectiveAt: new Date(),
+      effectiveAt: now,
       formulaVersion: entitlement.formulaVersion,
       inputSnapshot: entitlement.inputSnapshot,
       metadata: { settlementType: payout.settlementType },
@@ -144,28 +184,6 @@ const writeSettlementJournalEntries = async ({
     session
   );
   journalEntryIds.push(entitlementEntry._id);
-
-  const authorizedEntry = await appendJournalEntry(
-    {
-      businessKey: `${baseKey}:authorized:${clientRequestId}`,
-      eventType: JOURNAL_EVENT_TYPES.SETTLEMENT_AUTHORIZED,
-      amount: entitlement.finalEntitlement,
-      debitAccount: JOURNAL_ACCOUNTS.SETTLEMENT_PAYABLE,
-      creditAccount: JOURNAL_ACCOUNTS.SETTLEMENT_PAYABLE,
-      customer: customerId,
-      scheme: scheme._id,
-      sourceRecordType: "Scheme",
-      sourceRecordId: scheme._id,
-      actor: actor._id,
-      actorRole: actor.role,
-      clientRequestId,
-      effectiveAt: new Date(),
-      formulaVersion: entitlement.formulaVersion,
-      metadata: { settlementType: payout.settlementType },
-    },
-    session
-  );
-  journalEntryIds.push(authorizedEntry._id);
 
   const paidEntry = await appendJournalEntry(
     {
@@ -181,13 +199,13 @@ const writeSettlementJournalEntries = async ({
       actor: actor._id,
       actorRole: actor.role,
       clientRequestId,
-      effectiveAt: new Date(),
+      effectiveAt: now,
       formulaVersion: entitlement.formulaVersion,
       metadata: {
         settlementType: payout.settlementType,
         payoutMethod: payout.payoutMethod,
         payoutReference: payout.payoutReference,
-        payoutEvidence: payout.payoutEvidence || null,
+        payoutEvidence: payout.payoutEvidence,
       },
     },
     session
@@ -234,220 +252,6 @@ const getSettlementDetail = async (schemeId) => {
   };
 };
 
-const authorizeSettlement = async (schemeId, payload, actor, session) => {
-  const scheme = await Scheme.findOne({
-    _id: schemeId,
-    status: SCHEME_STATUS.ACTIVE,
-  }).session(session);
-
-  if (!scheme) {
-    const existing = await Scheme.findById(schemeId).session(session);
-    if (existing && (isSchemeSettled(existing) || isSchemeFinanciallyLocked(existing))) {
-      throw new ApiError(409, "Scheme is already settled.", [], {
-        code: ERROR_CODES.SCHEME_ALREADY_SETTLED,
-        retryable: false,
-      });
-    }
-    throw new ApiError(409, "Scheme must be ACTIVE to settle.");
-  }
-
-  if (scheme.settlementWorkflow?.status && LOCKED_WORKFLOW_STATUSES.has(scheme.settlementWorkflow.status)) {
-    throw new ApiError(409, "Settlement is already in progress.", [], {
-      code: ERROR_CODES.SETTLEMENT_INVALID_STATE,
-      retryable: false,
-    });
-  }
-
-  assertSettlementEligibility(scheme, payload.status);
-  const entitlement = await computeEntitlement(scheme._id, session);
-
-  if (entitlement.finalEntitlement <= 0) {
-    throw new ApiError(400, "No eligible contributions to settle.", [], {
-      code: ERROR_CODES.SETTLEMENT_NOT_ELIGIBLE,
-      retryable: false,
-    });
-  }
-
-  const now = new Date();
-  scheme.settlementWorkflow = {
-    status: SETTLEMENT_WORKFLOW_STATUS.APPROVED,
-    settlementType: payload.status,
-    entitlementAmount: entitlement.finalEntitlement,
-    formulaVersion: entitlement.formulaVersion,
-    inputSnapshot: entitlement.inputSnapshot,
-    requestedAt: now,
-    requestedBy: actor._id,
-    approvedAt: now,
-    approvedBy: actor._id,
-    notes: payload.notes?.trim() || "",
-    clientRequestId: payload.clientRequestId,
-    journalEntryIds: [],
-  };
-  scheme.updatedBy = actor._id;
-  scheme.financialVersion = (scheme.financialVersion || 0) + 1;
-  await scheme.save({ session });
-
-  return { scheme, entitlement };
-};
-
-const recordSettlementPayout = async (schemeId, payload, actor, session) => {
-  const scheme = await Scheme.findOne({
-    _id: schemeId,
-    status: SCHEME_STATUS.ACTIVE,
-  }).session(session);
-
-  if (!scheme?.settlementWorkflow) {
-    throw new ApiError(409, "Settlement must be authorized before payout.", [], {
-      code: ERROR_CODES.SETTLEMENT_INVALID_STATE,
-      retryable: false,
-    });
-  }
-
-  const workflow = scheme.settlementWorkflow;
-  if (![SETTLEMENT_WORKFLOW_STATUS.APPROVED, SETTLEMENT_WORKFLOW_STATUS.PAYOUT_PENDING].includes(workflow.status)) {
-    if (workflow.status === SETTLEMENT_WORKFLOW_STATUS.PAID || workflow.status === SETTLEMENT_WORKFLOW_STATUS.FINALIZED) {
-      return { scheme, alreadyPaid: true };
-    }
-    throw new ApiError(409, "Settlement is not ready for payout.", [], {
-      code: ERROR_CODES.SETTLEMENT_INVALID_STATE,
-      retryable: false,
-    });
-  }
-
-  const payout = assertPayoutPayload(payload);
-  const entitlement = await computeEntitlement(scheme._id, session);
-
-  if (entitlement.finalEntitlement !== workflow.entitlementAmount) {
-    throw new ApiError(409, "Entitlement changed since authorization.", [], {
-      code: ERROR_CODES.SETTLEMENT_ENTITLEMENT_MISMATCH,
-      retryable: false,
-    });
-  }
-
-  const journalEntryIds = await writeSettlementJournalEntries({
-    scheme,
-    customerId: scheme.customer,
-    entitlement,
-    payout: {
-      settlementType: workflow.settlementType,
-      payoutMethod: payout.payoutMethod,
-      payoutReference: payout.payoutReference,
-      payoutEvidence: payload.payoutEvidence || null,
-    },
-    actor,
-    clientRequestId: payload.clientRequestId,
-    session,
-  });
-
-  const now = new Date();
-  scheme.settlementWorkflow = {
-    ...plainWorkflow(workflow),
-    status: SETTLEMENT_WORKFLOW_STATUS.PAID,
-    payoutPendingAt: workflow.payoutPendingAt || now,
-    paidAt: now,
-    paidBy: actor._id,
-    payoutMethod: payout.payoutMethod,
-    payoutReference: payout.payoutReference,
-    payoutEvidence: payload.payoutEvidence || { objectRef: "", checksum: "" },
-    journalEntryIds,
-  };
-  scheme.updatedBy = actor._id;
-  await scheme.save({ session });
-
-  return { scheme, entitlement, journalEntryIds };
-};
-
-const finalizeSettlement = async (schemeId, payload, actor, session) => {
-  const scheme = await Scheme.findOne({
-    _id: schemeId,
-    status: SCHEME_STATUS.ACTIVE,
-  }).session(session);
-
-  if (!scheme?.settlementWorkflow) {
-    throw new ApiError(409, "Settlement workflow not found.", [], {
-      code: ERROR_CODES.SETTLEMENT_INVALID_STATE,
-      retryable: false,
-    });
-  }
-
-  const workflow = scheme.settlementWorkflow;
-  if (workflow.status === SETTLEMENT_WORKFLOW_STATUS.FINALIZED) {
-    return { scheme, alreadyFinalized: true };
-  }
-
-  if (workflow.status !== SETTLEMENT_WORKFLOW_STATUS.PAID) {
-    throw new ApiError(409, "Settlement payout must be recorded before finalization.", [], {
-      code: ERROR_CODES.SETTLEMENT_INVALID_STATE,
-      retryable: false,
-    });
-  }
-
-  const entitlement = await computeEntitlement(scheme._id, session);
-  if (entitlement.finalEntitlement !== workflow.entitlementAmount) {
-    throw new ApiError(409, "Entitlement changed since payout.", [], {
-      code: ERROR_CODES.SETTLEMENT_ENTITLEMENT_MISMATCH,
-      retryable: false,
-    });
-  }
-
-  const settlementType = workflow.settlementType;
-  const totalPaidAtSettlement = await getTotalPaidForScheme(scheme._id, session);
-  const now = new Date();
-  const settlementReceiptId = await generateSettlementReceiptNumber(now, session);
-
-  appendStatusHistory(scheme, {
-    status: settlementType,
-    changedBy: actor._id,
-    changedByRole: actor.role,
-    notes: workflow.notes || payload.notes?.trim() || "",
-  });
-
-  scheme.status = settlementType;
-  scheme.settlement = {
-    amount: workflow.entitlementAmount,
-    settledAt: now,
-    settledBy: actor._id,
-    notes: workflow.notes || payload.notes?.trim() || "",
-    clientRequestId: payload.clientRequestId || workflow.clientRequestId,
-    formulaVersion: workflow.formulaVersion,
-    totalPaidAtSettlement,
-    payoutMethod: workflow.payoutMethod,
-    payoutReference: workflow.payoutReference,
-    settlementReceiptId,
-    settlementCategory: settlementCategoryForType(settlementType),
-  };
-  scheme.settlementWorkflow = {
-    ...plainWorkflow(workflow),
-    status: SETTLEMENT_WORKFLOW_STATUS.FINALIZED,
-    finalizedAt: now,
-    finalizedBy: actor._id,
-  };
-  scheme.updatedBy = actor._id;
-  scheme.financialVersion = (scheme.financialVersion || 0) + 1;
-  await scheme.save({ session });
-
-  await logAudit({
-    actor: actor._id,
-    actorRole: actor.role,
-    action: auditActionForStatus[settlementType],
-    targetType: "Scheme",
-    targetId: scheme._id,
-    newValue: {
-      status: settlementType,
-      entitlementAmount: workflow.entitlementAmount,
-      formulaVersion: workflow.formulaVersion,
-      payoutMethod: workflow.payoutMethod,
-      payoutReference: workflow.payoutReference,
-      settlementReceiptId,
-      clientRequestId: payload.clientRequestId || workflow.clientRequestId,
-    },
-    notes: `Scheme settlement finalized as ${settlementType}`,
-    session,
-  });
-
-  return { scheme, entitlement };
-};
-
 const completeSettlement = async (schemeId, payload, actor) => {
   if (payload.settlementAmount !== undefined) {
     throw new ApiError(400, "settlementAmount is not allowed; entitlement is server-computed.", [], {
@@ -458,13 +262,11 @@ const completeSettlement = async (schemeId, payload, actor) => {
 
   await assertSettlementActorAllowed(actor, payload.status);
 
-  const trimmedNotes = payload.notes?.trim();
-  if (!trimmedNotes) {
-    throw new ApiError(400, "Notes are required for this status change.");
-  }
+  const trimmedNotes = payload.notes?.trim() || "";
 
   const payout = assertPayoutPayload(payload);
   const clientRequestId = payload.clientRequestId;
+  const payoutEvidence = normalizeEvidence(payload.payoutEvidence);
 
   const idempotencyPayload = {
     schemeId,
@@ -472,6 +274,7 @@ const completeSettlement = async (schemeId, payload, actor) => {
     notes: trimmedNotes,
     payoutMethod: payout.payoutMethod,
     payoutReference: payout.payoutReference,
+    payoutEvidence,
   };
 
   const txnResult = await withTransaction(async (session) => {
@@ -485,33 +288,113 @@ const completeSettlement = async (schemeId, payload, actor) => {
       return { replay: true, response: replay.response };
     }
 
-    await authorizeSettlement(
-      schemeId,
-      { status: payload.status, notes: trimmedNotes, clientRequestId },
-      actor,
-      session
-    );
+    const scheme = await Scheme.findOne({
+      _id: schemeId,
+      status: SCHEME_STATUS.ACTIVE,
+    }).session(session);
 
-    await recordSettlementPayout(
-      schemeId,
-      {
+    if (!scheme) {
+      const existing = await Scheme.findById(schemeId).session(session);
+      if (existing && (isSchemeSettled(existing) || isSchemeFinanciallyLocked(existing))) {
+        throw new ApiError(409, "Scheme is already settled.", [], {
+          code: ERROR_CODES.SCHEME_ALREADY_SETTLED,
+          retryable: false,
+        });
+      }
+      throw new ApiError(409, "Scheme must be ACTIVE to settle.");
+    }
+
+    await ensureNoLegacyIntermediateWorkflow(scheme, session);
+    assertSettlementEligibility(scheme, payload.status);
+
+    const entitlement = await computeEntitlement(scheme._id, session);
+    if (entitlement.finalEntitlement <= 0) {
+      throw new ApiError(400, "No eligible contributions to settle.", [], {
+        code: ERROR_CODES.SETTLEMENT_NOT_ELIGIBLE,
+        retryable: false,
+      });
+    }
+
+    const now = new Date();
+    const settlementReceiptId = await generateSettlementReceiptNumber(now, session);
+    const totalPaidAtSettlement = await getTotalPaidForScheme(scheme._id, session);
+    const journalEntryIds = await writeSettlementJournalEntries({
+      scheme,
+      customerId: scheme.customer,
+      entitlement,
+      payout: {
+        settlementType: payload.status,
         payoutMethod: payout.payoutMethod,
         payoutReference: payout.payoutReference,
-        payoutEvidence: payload.payoutEvidence,
-        clientRequestId,
+        payoutEvidence,
       },
       actor,
-      session
-    );
+      clientRequestId,
+      session,
+    });
 
-    const { scheme } = await finalizeSettlement(
-      schemeId,
-      { notes: trimmedNotes, clientRequestId },
-      actor,
-      session
-    );
+    appendStatusHistory(scheme, {
+      status: payload.status,
+      changedBy: actor._id,
+      changedByRole: actor.role,
+      notes: trimmedNotes,
+    });
 
-    const response = { schemeId: scheme._id };
+    scheme.status = payload.status;
+    scheme.settlement = {
+      amount: entitlement.finalEntitlement,
+      settledAt: now,
+      settledBy: actor._id,
+      notes: trimmedNotes,
+      clientRequestId,
+      formulaVersion: entitlement.formulaVersion,
+      totalPaidAtSettlement,
+      payoutMethod: payout.payoutMethod,
+      payoutReference: payout.payoutReference,
+      payoutEvidence,
+      settlementReceiptId,
+      settlementCategory: settlementCategoryForType(payload.status),
+    };
+    scheme.settlementWorkflow = {
+      status: SETTLEMENT_WORKFLOW_STATUS.FINALIZED,
+      settlementType: payload.status,
+      entitlementAmount: entitlement.finalEntitlement,
+      formulaVersion: entitlement.formulaVersion,
+      inputSnapshot: entitlement.inputSnapshot,
+      settledAt: now,
+      settledBy: actor._id,
+      payoutMethod: payout.payoutMethod,
+      payoutReference: payout.payoutReference,
+      payoutEvidence,
+      notes: trimmedNotes,
+      clientRequestId,
+      settlementReceiptId,
+      journalEntryIds,
+    };
+    scheme.updatedBy = actor._id;
+    scheme.financialVersion = (scheme.financialVersion || 0) + 1;
+    await scheme.save({ session });
+
+    await logAudit({
+      actor: actor._id,
+      actorRole: actor.role,
+      action: auditActionForStatus[payload.status],
+      targetType: "Scheme",
+      targetId: scheme._id,
+      newValue: {
+        status: payload.status,
+        entitlementAmount: entitlement.finalEntitlement,
+        formulaVersion: entitlement.formulaVersion,
+        payoutMethod: payout.payoutMethod,
+        payoutReference: payout.payoutReference,
+        settlementReceiptId,
+        clientRequestId,
+      },
+      notes: `Scheme settlement finalized as ${payload.status}`,
+      session,
+    });
+
+    const response = { schemeId: scheme._id, settlementReceiptId };
 
     await saveIdempotencyResult({
       clientRequestId: replay.clientRequestId,
@@ -535,8 +418,5 @@ const completeSettlement = async (schemeId, payload, actor) => {
 module.exports = {
   previewEntitlement,
   getSettlementDetail,
-  authorizeSettlement,
-  recordSettlementPayout,
-  finalizeSettlement,
   completeSettlement,
 };

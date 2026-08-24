@@ -58,10 +58,16 @@ const staffSelfCashSubmissionSchema = cashSubmissionSchema.omit({ staff: true })
 const schemeSettlementSchema = z
   .object({
     status: z.enum([SCHEME_STATUS.REDEEMED, SCHEME_STATUS.CLOSED]),
-    notes: z.string().trim().min(1, "Notes are required for settlement."),
+    notes: z.string().trim().optional(),
     clientRequestId: clientRequestIdSchema,
     payoutMethod: z.enum(ALLOWED_SETTLEMENT_PAYOUT_METHODS),
     payoutReference: z.string().trim().optional(),
+    payoutEvidence: z
+      .object({
+        objectRef: z.string().trim().min(1),
+        checksum: z.string().trim().min(1),
+      })
+      .optional(),
   })
   .strict();
 

@@ -23,9 +23,6 @@ const { collectPayment } = require("../src/services/payment.service");
 const { createScheme, updateSchemeStatus } = require("../src/services/schemeManagement.service");
 const {
   previewEntitlement,
-  authorizeSettlement,
-  recordSettlementPayout,
-  finalizeSettlement,
   getSettlementDetail,
 } = require("../src/services/settlement.service");
 const { createCustomer } = require("../src/services/customer.service");
@@ -33,7 +30,6 @@ const { getSettlementTotals, getCashPositionSummary } = require("../src/services
 const { SETTLEMENT_STAFF_PERMISSIONS } = require("./helpers/staffTestPermissions");
 const { runMigrations } = require("../src/migrations/runMigrations");
 const migration002 = require("../src/migrations/versions/002_financial_journal_backfill");
-const { withTransaction } = require("../src/utils/transaction");
 const { calculateSchemeDates } = require("../src/services/scheme.service");
 const { deriveSchemeWindow } = require("../src/utils/schemeWindow");
 
@@ -251,60 +247,20 @@ describe("Phase 3 settlement and journal", () => {
     assert.equal(settled.status, SCHEME_STATUS.CLOSED);
   });
 
-  it("status authorization alone does not reduce vault cash", async () => {
-    const admin = await createAdmin();
-    const { customer, scheme } = await seedCustomerScheme(admin);
-    await pay(customer, scheme, admin, 5000, PAYMENT_METHODS.UPI);
-
-    const before = await getSettlementTotals();
-    await withMockedNow(maturityTime(), async () => {
-      await withTransaction(async (session) => {
-        await authorizeSettlement(
-          scheme._id,
-          {
-            status: SCHEME_STATUS.REDEEMED,
-            notes: "Authorized only",
-            clientRequestId: reqId(),
-          },
-          admin,
-          session
-        );
-      });
-    });
-    const after = await getSettlementTotals();
-    assert.equal(before.totalCustomerSettlement, 0);
-    assert.equal(after.totalCustomerSettlement, 0);
-  });
-
-  it("vault cash reduces only after journaled SETTLEMENT_PAID", async () => {
+  it("direct settlement writes economic journal effects without authorization self-entry", async () => {
     const admin = await createAdmin();
     const { customer, scheme } = await seedCustomerScheme(admin);
     await pay(customer, scheme, admin, 7000, PAYMENT_METHODS.UPI);
 
     await withMockedNow(maturityTime(), async () => {
-      const clientRequestId = reqId();
-      await withTransaction(async (session) => {
-        await authorizeSettlement(
-          scheme._id,
-          {
-            status: SCHEME_STATUS.REDEEMED,
-            notes: "Payout test",
-            clientRequestId,
-          },
-          admin,
-          session
-        );
-        await recordSettlementPayout(
-          scheme._id,
-          {
-            payoutMethod: PAYMENT_METHODS.UPI,
-            payoutReference: "PAY-REF-001",
-            clientRequestId,
-          },
-          admin,
-          session
-        );
-      });
+      await updateSchemeStatus(
+        scheme._id,
+        settlePayload({
+          payoutMethod: PAYMENT_METHODS.UPI,
+          payoutReference: "PAY-REF-001",
+        }),
+        admin
+      );
 
       const totals = await getSettlementTotals();
       assert.equal(totals.totalCustomerSettlement, 7000);
@@ -315,6 +271,12 @@ describe("Phase 3 settlement and journal", () => {
       });
       assert.equal(paidEntries.length, 1);
       assert.equal(paidEntries[0].amount, 7000);
+
+      const authorizedEntries = await FinancialJournal.find({
+        scheme: scheme._id,
+        eventType: "SETTLEMENT_AUTHORIZED",
+      });
+      assert.equal(authorizedEntries.length, 0);
     });
   });
 
@@ -383,30 +345,7 @@ describe("Phase 3 settlement and journal", () => {
 
     await withMockedNow(maturityTime(), async () => {
       const payload = settlePayload();
-      await withTransaction(async (session) => {
-        await authorizeSettlement(
-          scheme._id,
-          payload,
-          admin,
-          session
-        );
-        await recordSettlementPayout(
-          scheme._id,
-          {
-            payoutMethod: payload.payoutMethod,
-            payoutReference: payload.payoutReference,
-            clientRequestId: payload.clientRequestId,
-          },
-          admin,
-          session
-        );
-        await finalizeSettlement(
-          scheme._id,
-          { clientRequestId: payload.clientRequestId },
-          admin,
-          session
-        );
-      });
+      await updateSchemeStatus(scheme._id, payload, admin);
 
       const saved = await Scheme.findById(scheme._id);
       assert.equal(saved.settlementWorkflow.status, SETTLEMENT_WORKFLOW_STATUS.FINALIZED);

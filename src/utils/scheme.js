@@ -3,10 +3,11 @@ const ApiError = require("./ApiError");
 const { ERROR_CODES } = require("../constants/errorCodes");
 
 const LOCKED_WORKFLOW_STATUSES = new Set([
-  SETTLEMENT_WORKFLOW_STATUS.APPROVED,
-  SETTLEMENT_WORKFLOW_STATUS.PAYOUT_PENDING,
-  SETTLEMENT_WORKFLOW_STATUS.PAID,
   SETTLEMENT_WORKFLOW_STATUS.FINALIZED,
+  "REQUESTED",
+  "APPROVED",
+  "PAYOUT_PENDING",
+  "PAID",
 ]);
 
 const isSchemeSettled = (scheme) =>
