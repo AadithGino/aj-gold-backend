@@ -10,7 +10,7 @@ require("dotenv").config();
 const bcrypt = require("bcryptjs");
 const mongoose = require("mongoose");
 const { connectDb } = require("../config/db");
-const env = require("../config/env");
+const { assertDestructiveOperationAllowed } = require("../ops/destructiveGuard");
 const User = require("../models/user.model");
 const Customer = require("../models/customer.model");
 const Scheme = require("../models/scheme.model");
@@ -44,10 +44,12 @@ const {
   getCustomerLedger,
   getSchemeLedger,
 } = require("../services/report.service");
+const { generateTemporaryPassword } = require("../services/auth.service");
+const { assertPrivilegedPassword } = require("../constants/credentialPolicies");
 
-const ADMIN_PHONE = "9999999999";
-const ADMIN_PASSWORD = "admin123";
-const STAFF_PASSWORD = "agent123";
+const ADMIN_PHONE = process.env.DEFAULT_ADMIN_PHONE || "9999999999";
+const ADMIN_PASSWORD = process.env.DEFAULT_ADMIN_PASSWORD || "";
+const STAFF_PASSWORD = process.env.DEFAULT_STAFF_PASSWORD || "";
 
 const STAFF = [
   {
@@ -250,7 +252,9 @@ const clearDatabase = async () => {
 };
 
 const ensureAdmin = async () => {
-  const passwordHash = await bcrypt.hash(ADMIN_PASSWORD, 12);
+  const password = ADMIN_PASSWORD || generateTemporaryPassword();
+  assertPrivilegedPassword(password);
+  const passwordHash = await bcrypt.hash(password, 12);
   const admin = await User.create({
     name: "Admin",
     phone: ADMIN_PHONE,
@@ -258,7 +262,7 @@ const ensureAdmin = async () => {
     role: USER_ROLES.ADMIN,
     status: USER_STATUS.ACTIVE,
   });
-  log(`✓ Admin created (${ADMIN_PHONE} / ${ADMIN_PASSWORD})`);
+  log(`✓ Admin created (${ADMIN_PHONE})`);
   return admin;
 };
 
@@ -297,13 +301,22 @@ const verifyCashPosition = async (cash) => {
 };
 
 const run = async () => {
-  if (!env.mongoUri) {
+  const mongoUri = process.env.MONGO_URI;
+  assertDestructiveOperationAllowed({
+    mongoUri,
+    operationLabel: "cash vault demo seed",
+  });
+
+  if (!mongoUri) {
     fail("MONGO_URI is required.");
   }
 
+  const staffPassword = STAFF_PASSWORD || generateTemporaryPassword();
+  assertPrivilegedPassword(staffPassword);
+
   log("\nAJ Gold — Cash Vault Demo Seed\n");
 
-  await connectDb(env.mongoUri);
+  await connectDb(mongoUri);
   await clearDatabase();
   const admin = await ensureAdmin();
 
@@ -313,7 +326,7 @@ const run = async () => {
       {
         name: agent.name,
         phone: agent.phone,
-        password: STAFF_PASSWORD,
+        password: staffPassword,
         permissions: { canCreateCustomer: true, canCollectPayment: true },
         notes: "Cash vault demo agent",
       },

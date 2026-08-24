@@ -4,6 +4,7 @@ const {
   adminOrStaffMiddleware,
   adminOnlyMiddleware,
   staffPermissionMiddleware,
+  staffPermissionAnyMiddleware,
 } = require("../middleware/staffPermission.middleware");
 const {
   createCustomerHandler,
@@ -19,12 +20,12 @@ const router = express.Router();
 router.use(authMiddleware);
 router.use(adminOrStaffMiddleware);
 
-router.get("/", listCustomersHandler);
-router.get("/:customerId/schemes", getCustomerSchemesHandler);
-router.get("/:customerId", getCustomerHandler);
+router.get("/", staffPermissionAnyMiddleware(["canCollectPayment"]), listCustomersHandler);
+router.get("/:customerId/schemes", staffPermissionAnyMiddleware(["canCollectPayment"]), getCustomerSchemesHandler);
+router.get("/:customerId", staffPermissionAnyMiddleware(["canCollectPayment"]), getCustomerHandler);
 
 router.post("/", staffPermissionMiddleware("canCreateCustomer"), createCustomerHandler);
-router.patch("/:customerId", updateCustomerHandler);
+router.patch("/:customerId", adminOnlyMiddleware, updateCustomerHandler);
 router.post("/:customerId/reset-password", adminOnlyMiddleware, resetCustomerPasswordHandler);
 
 module.exports = router;

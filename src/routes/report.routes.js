@@ -1,6 +1,10 @@
 const express = require("express");
 const authMiddleware = require("../middleware/auth.middleware");
 const {
+  adminOrStaffMiddleware,
+  staffPermissionMiddleware,
+} = require("../middleware/staffPermission.middleware");
+const {
   collectionsHandler,
   staffPerformanceHandler,
   cashPositionHandler,
@@ -13,13 +17,14 @@ const {
 const router = express.Router();
 
 router.use(authMiddleware);
+router.use(adminOrStaffMiddleware);
 
-router.get("/collections", collectionsHandler);
-router.get("/staff-performance", staffPerformanceHandler);
-router.get("/cash-position", cashPositionHandler);
-router.get("/schemes", schemesHandler);
-router.get("/maturity-calendar", maturityCalendarHandler);
-router.get("/customer-ledger/:customerId", customerLedgerHandler);
-router.get("/scheme-ledger/:schemeId", schemeLedgerHandler);
+router.get("/collections", staffPermissionMiddleware("canViewReports"), collectionsHandler);
+router.get("/staff-performance", staffPermissionMiddleware("canViewReports"), staffPerformanceHandler);
+router.get("/cash-position", staffPermissionMiddleware("canViewReports"), cashPositionHandler);
+router.get("/schemes", staffPermissionMiddleware("canViewReports"), schemesHandler);
+router.get("/maturity-calendar", staffPermissionMiddleware("canViewReports"), maturityCalendarHandler);
+router.get("/customer-ledger/:customerId", staffPermissionMiddleware("canViewReports"), customerLedgerHandler);
+router.get("/scheme-ledger/:schemeId", staffPermissionMiddleware("canViewReports"), schemeLedgerHandler);
 
 module.exports = router;

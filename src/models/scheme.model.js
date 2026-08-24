@@ -1,5 +1,6 @@
 const mongoose = require("mongoose");
 const { SCHEME_STATUS } = require("../constants/enums");
+const settlementWorkflowSchema = require("./settlementWorkflow.schema");
 
 const settlementSchema = new mongoose.Schema(
   {
@@ -8,8 +9,12 @@ const settlementSchema = new mongoose.Schema(
     settledBy: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
     notes: { type: String, trim: true, default: "" },
     clientRequestId: { type: String, trim: true, default: "" },
-    overrideReason: { type: String, trim: true, default: "" },
+    formulaVersion: { type: String, trim: true, default: "" },
     totalPaidAtSettlement: { type: Number, min: 0 },
+    payoutMethod: { type: String, trim: true, default: "" },
+    payoutReference: { type: String, trim: true, default: "" },
+    settlementReceiptId: { type: String, trim: true, default: "" },
+    settlementCategory: { type: String, trim: true, default: "" },
   },
   { _id: false }
 );
@@ -41,6 +46,7 @@ const schemeSchema = new mongoose.Schema(
     },
     statusHistory: [statusHistorySchema],
     settlement: settlementSchema,
+    settlementWorkflow: settlementWorkflowSchema,
     financialVersion: { type: Number, default: 0 },
     createdBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
     updatedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },

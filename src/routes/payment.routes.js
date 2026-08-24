@@ -20,9 +20,9 @@ router.use(authMiddleware);
 router.use(adminOrStaffMiddleware);
 
 router.post("/", staffPermissionMiddleware("canCollectPayment"), collectPaymentHandler);
-router.get("/", listPaymentsHandler);
-router.get("/:paymentId", getPaymentDetailHandler);
-router.get("/:paymentId/receipt", getPaymentReceiptHandler);
+router.get("/", staffPermissionMiddleware("canCollectPayment"), listPaymentsHandler);
+router.get("/:paymentId", staffPermissionMiddleware("canCollectPayment"), getPaymentDetailHandler);
+router.get("/:paymentId/receipt", staffPermissionMiddleware("canCollectPayment"), getPaymentReceiptHandler);
 router.post("/:paymentId/correction-request", createCorrectionHandler);
 router.post("/:paymentId/corrections", createCorrectionHandler);
 router.patch("/:paymentId/reverse", adminOnlyMiddleware, reversePaymentHandler);

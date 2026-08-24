@@ -8,29 +8,21 @@ const {
 } = require("../constants/enums");
 const ApiError = require("../utils/ApiError");
 const { ERROR_CODES } = require("../constants/errorCodes");
-const { hasStaffPermission } = require("../constants/staffPermissions");
-const { parsePositiveRupeeInteger } = require("../utils/money");
 const { withTransaction } = require("../utils/transaction");
-const { isSchemeSettled } = require("../utils/scheme");
 const { logAudit } = require("./audit.service");
 const { enrichScheme } = require("./customer.service");
 const {
   calculateSchemeDates,
-  assertCustomerCanCreateActiveScheme,
   appendStatusHistory,
   createEnrollmentNumber,
 } = require("./scheme.service");
-const { getCustomerOrThrow } = require("./customer.service");
-const { getTotalPaidForScheme } = require("./paymentLimit.service");
+const { getCustomerOrThrow, assertCustomerActiveForOperations } = require("./customer.service");
 const {
   checkIdempotencyReplay,
   saveIdempotencyResult,
 } = require("./idempotency.service");
-
-const auditActionForStatus = {
-  [SCHEME_STATUS.REDEEMED]: AUDIT_ACTIONS.SCHEME_REDEEMED,
-  [SCHEME_STATUS.CLOSED]: AUDIT_ACTIONS.SCHEME_CLOSED,
-};
+const { buildSchemeCreateIntent } = require("../utils/idempotencyPayload");
+const { completeSettlement } = require("./settlement.service");
 
 const getSchemeOrThrow = async (schemeId, session = null) => {
   const scheme = await Scheme.findById(schemeId).session(session || null);
@@ -40,91 +32,17 @@ const getSchemeOrThrow = async (schemeId, session = null) => {
   return scheme;
 };
 
-const createScheme = async ({ customerId, schemeName, startDate }, actor) => {
-  const customer = await getCustomerOrThrow(customerId);
-  await assertCustomerCanCreateActiveScheme(customerId);
-
-  const dates = calculateSchemeDates(startDate || new Date());
-  const enrollmentNumber = await createEnrollmentNumber(dates.startDate);
-
-  const scheme = await Scheme.create({
-    customer: customer._id,
-    enrollmentNumber,
-    schemeName: schemeName?.trim() || "Gold Savings Scheme",
-    startDate: dates.startDate,
-    sixMonthDate: dates.sixMonthDate,
-    maturityDate: dates.maturityDate,
-    status: SCHEME_STATUS.ACTIVE,
-    statusHistory: [
-      {
-        status: SCHEME_STATUS.ACTIVE,
-        changedBy: actor._id,
-        changedByRole: actor.role,
-        changedAt: new Date(),
-        notes: "Scheme created",
-      },
-    ],
-    createdBy: actor._id,
-    updatedBy: actor._id,
-  });
-
-  await logAudit({
-    actor: actor._id,
-    actorRole: actor.role,
-    action: AUDIT_ACTIONS.SCHEME_CREATED,
-    targetType: "Scheme",
-    targetId: scheme._id,
-    newValue: {
-      customerId: customer._id,
-      enrollmentNumber: scheme.enrollmentNumber,
-      passbookNumber: customer.passbookNumber,
-    },
-    notes: "Scheme enrollment created",
-  });
-
-  return enrichScheme(scheme);
-};
-
-const updateSchemeStatus = async (schemeId, payload, actor) => {
-  const { status, notes } = payload;
-
-  if (actor.role === USER_ROLES.STAFF) {
-    const profile = await StaffProfile.findOne({ user: actor._id });
-    if (status === SCHEME_STATUS.REDEEMED && !hasStaffPermission(profile, "canMarkRedeemed")) {
-      throw new ApiError(403, "Staff does not have redeem permission.");
-    }
-    if (status === SCHEME_STATUS.CLOSED && !hasStaffPermission(profile, "canMarkClosed")) {
-      throw new ApiError(403, "Staff does not have early closure permission.");
-    }
-  } else if (actor.role !== USER_ROLES.ADMIN) {
-    throw new ApiError(403, "Only admin or authorized staff can settle schemes.");
+const createScheme = async ({ customerId, schemeName, startDate, clientRequestId }, actor) => {
+  if (!clientRequestId?.trim()) {
+    throw new ApiError(400, "clientRequestId is required.");
   }
 
-  if (![SCHEME_STATUS.REDEEMED, SCHEME_STATUS.CLOSED].includes(status)) {
-    throw new ApiError(
-      400,
-      "Only REDEEMED (after maturity) or CLOSED (before maturity) are allowed."
-    );
-  }
-
-  const settlementAmount = parsePositiveRupeeInteger(payload.settlementAmount, "settlementAmount");
-  const trimmedNotes = notes?.trim();
-  if (!trimmedNotes) {
-    throw new ApiError(400, "Notes are required for this status change.");
-  }
-
-  const idempotencyPayload = {
-    schemeId,
-    status,
-    settlementAmount,
-    notes: trimmedNotes,
-    overrideReason: payload.overrideReason?.trim() || "",
-  };
+  const idempotencyPayload = buildSchemeCreateIntent({ customerId, schemeName, startDate });
 
   const txnResult = await withTransaction(async (session) => {
     const replay = await checkIdempotencyReplay({
-      clientRequestId: payload.clientRequestId,
-      operationType: IDEMPOTENCY_OPERATIONS.SCHEME_SETTLEMENT,
+      clientRequestId,
+      operationType: IDEMPOTENCY_OPERATIONS.SCHEME_CREATE,
       requestPayload: idempotencyPayload,
       session,
     });
@@ -132,82 +50,77 @@ const updateSchemeStatus = async (schemeId, payload, actor) => {
       return { replay: true, response: replay.response };
     }
 
-    const scheme = await Scheme.findOne({
-      _id: schemeId,
+    const customer = await getCustomerOrThrow(customerId);
+    await assertCustomerActiveForOperations(customer);
+    const activeScheme = await Scheme.findOne({
+      customer: customer._id,
       status: SCHEME_STATUS.ACTIVE,
     }).session(session);
+    if (activeScheme) {
+      throw new ApiError(
+        409,
+        "Customer already has an active scheme. Close or complete the current scheme before creating another active scheme.",
+        [],
+        {
+          code: ERROR_CODES.DUPLICATE_ACTIVE_SCHEME,
+          retryable: false,
+        }
+      );
+    }
 
-    if (!scheme) {
-      const existing = await Scheme.findById(schemeId).session(session);
-      if (existing && isSchemeSettled(existing)) {
-        throw new ApiError(409, "Scheme is already settled.", [], {
-          code: ERROR_CODES.SCHEME_ALREADY_SETTLED,
+    const dates = calculateSchemeDates(startDate || new Date());
+    const enrollmentNumber = await createEnrollmentNumber(dates.startDate);
+
+    let scheme;
+    try {
+      [scheme] = await Scheme.create(
+        [
+          {
+            customer: customer._id,
+            enrollmentNumber,
+            schemeName: schemeName?.trim() || "Gold Savings Scheme",
+            startDate: dates.startDate,
+            sixMonthDate: dates.sixMonthDate,
+            maturityDate: dates.maturityDate,
+            status: SCHEME_STATUS.ACTIVE,
+            statusHistory: [
+              {
+                status: SCHEME_STATUS.ACTIVE,
+                changedBy: actor._id,
+                changedByRole: actor.role,
+                changedAt: new Date(),
+                notes: "Scheme created",
+              },
+            ],
+            createdBy: actor._id,
+            updatedBy: actor._id,
+          },
+        ],
+        { session }
+      );
+    } catch (error) {
+      if (error?.code === 11000) {
+        throw new ApiError(409, "Customer already has an active scheme.", [], {
+          code: ERROR_CODES.DUPLICATE_ACTIVE_SCHEME,
           retryable: false,
         });
       }
-      throw new ApiError(409, "Scheme must be ACTIVE to settle.");
+      throw error;
     }
-
-    if (status === SCHEME_STATUS.REDEEMED && new Date() < new Date(scheme.maturityDate)) {
-      throw new ApiError(400, "Scheme can be redeemed only after maturity date.");
-    }
-
-    if (status === SCHEME_STATUS.CLOSED && new Date() >= new Date(scheme.maturityDate)) {
-      throw new ApiError(400, "After maturity date use REDEEMED status.");
-    }
-
-    const totalPaidAtSettlement = await getTotalPaidForScheme(scheme._id, session);
-    const overrideReason = payload.overrideReason?.trim() || "";
-
-    if (settlementAmount > totalPaidAtSettlement) {
-      if (!overrideReason) {
-        throw new ApiError(
-          400,
-          "overrideReason is required when settlementAmount exceeds total successful payments."
-        );
-      }
-    }
-
-    const previousStatus = scheme.status;
-    appendStatusHistory(scheme, {
-      status,
-      changedBy: actor._id,
-      changedByRole: actor.role,
-      notes: trimmedNotes,
-    });
-
-    scheme.status = status;
-    scheme.settlement = {
-      amount: settlementAmount,
-      settledAt: new Date(),
-      settledBy: actor._id,
-      notes: trimmedNotes,
-      clientRequestId: payload.clientRequestId,
-      overrideReason,
-      totalPaidAtSettlement,
-    };
-    scheme.updatedBy = actor._id;
-    scheme.financialVersion = (scheme.financialVersion || 0) + 1;
-    await scheme.save({ session });
-
-    const auditAction = auditActionForStatus[status] || AUDIT_ACTIONS.CUSTOMER_UPDATED;
 
     await logAudit({
       actor: actor._id,
       actorRole: actor.role,
-      action: auditAction,
+      action: AUDIT_ACTIONS.SCHEME_CREATED,
       targetType: "Scheme",
       targetId: scheme._id,
-      previousValue: { status: previousStatus },
       newValue: {
-        status,
-        notes: trimmedNotes,
-        settlementAmount,
-        totalPaidAtSettlement,
-        overrideReason,
-        clientRequestId: payload.clientRequestId,
+        customerId: customer._id,
+        enrollmentNumber: scheme.enrollmentNumber,
+        passbookNumber: customer.passbookNumber,
+        clientRequestId,
       },
-      notes: `Scheme status changed to ${status}`,
+      notes: "Scheme enrollment created",
       session,
     });
 
@@ -215,7 +128,7 @@ const updateSchemeStatus = async (schemeId, payload, actor) => {
 
     await saveIdempotencyResult({
       clientRequestId: replay.clientRequestId,
-      operationType: IDEMPOTENCY_OPERATIONS.SCHEME_SETTLEMENT,
+      operationType: IDEMPOTENCY_OPERATIONS.SCHEME_CREATE,
       requestHash: replay.requestHash,
       responsePayload: response,
       actor,
@@ -227,10 +140,13 @@ const updateSchemeStatus = async (schemeId, payload, actor) => {
     return { replay: false, schemeId: scheme._id };
   });
 
-  const resolvedSchemeId = txnResult.replay ? txnResult.response.schemeId : txnResult.schemeId;
-  const scheme = await getSchemeOrThrow(resolvedSchemeId);
+  const schemeId = txnResult.replay ? txnResult.response.schemeId : txnResult.schemeId;
+  const scheme = await getSchemeOrThrow(schemeId);
   return enrichScheme(scheme);
 };
+
+const updateSchemeStatus = async (schemeId, payload, actor) =>
+  completeSettlement(schemeId, payload, actor);
 
 const getSchemeDetail = async (schemeId) => {
   const scheme = await getSchemeOrThrow(schemeId);

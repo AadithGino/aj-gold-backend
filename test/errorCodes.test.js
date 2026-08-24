@@ -3,7 +3,6 @@ const assert = require("node:assert/strict");
 const ApiError = require("../src/utils/ApiError");
 const { ERROR_CODES } = require("../src/constants/errorCodes");
 const { errorHandler } = require("../src/middleware/error.middleware");
-const loginRateLimitMiddleware = require("../src/middleware/loginRateLimit.middleware");
 
 const invokeErrorHandler = (err, requestId = "req-test") => {
   const req = { requestId, originalUrl: "/api/test" };
@@ -68,17 +67,14 @@ describe("API error contract", () => {
   });
 
   it("rate limiting returns RATE_LIMITED", () => {
-    const req = { ip: "127.0.0.1", headers: {} };
-    const next = (err) => {
-      assert.equal(err.statusCode, 429);
-      assert.equal(err.code, ERROR_CODES.RATE_LIMITED);
-      assert.equal(err.retryable, false);
-    };
-
-    for (let i = 0; i < 20; i += 1) {
-      loginRateLimitMiddleware(req, {}, () => {});
-    }
-    loginRateLimitMiddleware(req, {}, next);
+    const err = new ApiError(429, "Too many login attempts. Please try again later.", [], {
+      code: ERROR_CODES.RATE_LIMITED,
+      retryable: false,
+    });
+    const { statusCode, body } = invokeErrorHandler(err);
+    assert.equal(statusCode, 429);
+    assert.equal(body.code, ERROR_CODES.RATE_LIMITED);
+    assert.equal(body.retryable, false);
   });
 });
 

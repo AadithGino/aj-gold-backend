@@ -1,23 +1,66 @@
 const dayjs = require("dayjs");
+const utc = require("dayjs/plugin/utc");
+const timezone = require("dayjs/plugin/timezone");
 const weekOfYear = require("dayjs/plugin/weekOfYear");
 const isoWeek = require("dayjs/plugin/isoWeek");
 
+dayjs.extend(utc);
+dayjs.extend(timezone);
 dayjs.extend(weekOfYear);
 dayjs.extend(isoWeek);
 
+const BUSINESS_TIMEZONE = "Asia/Kolkata";
+
 const toDate = (value) => (value instanceof Date ? value : new Date(value));
 
-const addMonths = (date, months) => dayjs(toDate(date)).add(months, "month").toDate();
+const isDateOnlyInput = (value) => {
+  if (value instanceof Date) {
+    return false;
+  }
+  if (typeof value !== "string") {
+    return false;
+  }
+  const trimmed = value.trim();
+  return /^\d{4}-\d{2}-\d{2}$/.test(trimmed);
+};
 
-const startOfDay = (date = new Date()) => dayjs(toDate(date)).startOf("day").toDate();
+const toBusinessInstant = (value) => {
+  if (value === null || value === undefined || value === "") {
+    return new Date();
+  }
 
-const endOfDay = (date = new Date()) => dayjs(toDate(date)).endOf("day").toDate();
+  if (isDateOnlyInput(value)) {
+    return dayjs.tz(value.trim(), BUSINESS_TIMEZONE).startOf("day").toDate();
+  }
 
-const startOfWeek = (date = new Date()) => dayjs(toDate(date)).startOf("week").toDate();
+  const parsed = toDate(value);
+  if (Number.isNaN(parsed.getTime())) {
+    throw new Error("Invalid date value.");
+  }
+  return parsed;
+};
 
-const startOfMonth = (date = new Date()) => dayjs(toDate(date)).startOf("month").toDate();
+const addCalendarMonthsInBusinessTz = (date, months) =>
+  dayjs(toBusinessInstant(date)).tz(BUSINESS_TIMEZONE).add(months, "month").toDate();
 
-const startOfYear = (date = new Date()) => dayjs(toDate(date)).startOf("year").toDate();
+const addMonths = (date, months) => addCalendarMonthsInBusinessTz(date, months);
+
+const inBusinessTz = (date = new Date()) => dayjs(toDate(date)).tz(BUSINESS_TIMEZONE);
+
+const startOfDay = (date = new Date()) => inBusinessTz(date).startOf("day").toDate();
+
+const endOfDay = (date = new Date()) => inBusinessTz(date).endOf("day").toDate();
+
+/** Week starts Monday (ISO) in Asia/Kolkata. */
+const startOfWeek = (date = new Date()) => inBusinessTz(date).startOf("isoWeek").toDate();
+
+const startOfMonth = (date = new Date()) => inBusinessTz(date).startOf("month").toDate();
+
+const startOfYear = (date = new Date()) => inBusinessTz(date).startOf("year").toDate();
+
+const businessYear = (date = new Date()) => inBusinessTz(date).year();
+
+const businessDayKey = (date = new Date()) => inBusinessTz(date).format("YYYY-MM-DD");
 
 const isSameOrBefore = (dateA, dateB) =>
   dayjs(toDate(dateA)).isBefore(dayjs(toDate(dateB))) ||
@@ -62,13 +105,19 @@ const buildPaymentDateMatch = (from, to) => {
 };
 
 module.exports = {
+  BUSINESS_TIMEZONE,
   toDate,
+  toBusinessInstant,
+  inBusinessTz,
+  addCalendarMonthsInBusinessTz,
   addMonths,
   startOfDay,
   endOfDay,
   startOfWeek,
   startOfMonth,
   startOfYear,
+  businessYear,
+  businessDayKey,
   isSameOrBefore,
   isAfter,
   parseDateRange,

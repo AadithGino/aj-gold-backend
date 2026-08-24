@@ -19,7 +19,14 @@ const { getPaymentMethodBreakdown } = require("./cash.service");
 const { getStaffCashInHand } = require("./staffCash.service");
 const { getCashPositionSummary } = require("./cashPosition.service");
 const { enrichScheme, getCustomerDetail, getCustomerOrThrow } = require("./customer.service");
-const { getSchemeLimitSummary } = require("./paymentLimit.service");
+const { getSchemeLimitSummariesBatch } = require("./paymentLimit.service");
+const { parseCursorPagination, buildCursorPage } = require("../utils/pagination");
+const { parseSafeSearchTerm } = require("../utils/safeSearch");
+const {
+  enrichPaymentsWithEffectiveView,
+  applyEffectivePaymentRow,
+  loadEffectivePaymentContext,
+} = require("../utils/effectiveReadModel");
 
 const mapSettlementEntry = (scheme, event, index = 0) => ({
   _id: `${scheme._id}-${event.status}-${event.changedAt || index}`,
@@ -55,7 +62,7 @@ const mapCollectedBy = (user) =>
     ? { _id: user._id, name: user.name, role: user.role }
     : null;
 
-const mapCollectionPayment = (payment) => ({
+const mapCollectionPayment = (payment, effectiveMeta = null) => ({
   _id: payment._id,
   receiptNumber: payment.receiptNumber,
   customerName: payment.customer?.name || null,
@@ -63,12 +70,22 @@ const mapCollectionPayment = (payment) => ({
   enrollmentNumber: payment.scheme?.enrollmentNumber || null,
   collectedBy: mapCollectedBy(payment.collectedBy),
   collectedByRole: payment.collectedByRole,
-  paymentDate: payment.paymentDate,
-  paymentMethod: payment.paymentMethod,
-  amount: payment.amount,
+  paymentDate: effectiveMeta?.displayPaymentDate ?? payment.paymentDate,
+  paymentMethod: effectiveMeta?.displayPaymentMethod ?? payment.paymentMethod,
+  amount: effectiveMeta?.displayAmount ?? payment.amount,
   status: payment.status,
   transactionReference: payment.transactionReference || "",
   notes: payment.notes || "",
+  createdAt: payment.createdAt,
+  ...(effectiveMeta
+    ? {
+        sourceAmount: payment.amount,
+        sourcePaymentMethod: payment.paymentMethod,
+        effectiveAmount: effectiveMeta.effectiveAmount,
+        effectivePaymentMethod: effectiveMeta.effectivePaymentMethod,
+        isEffectivelyReversed: effectiveMeta.isEffectivelyReversed,
+      }
+    : {}),
 });
 
 const buildBasePaymentQuery = (filters = {}) => {
@@ -103,23 +120,100 @@ const getCollectionReport = async (filters = {}, actor) => {
 
   const { query, range } = buildBasePaymentQuery(scopedFilters);
   const statusFilter = scopedFilters.status || PAYMENT_STATUS.SUCCESS;
+  const { limit, cursor: decodedCursor } = parseCursorPagination(scopedFilters, {
+    maxLimit: 200,
+    defaultLimit: 50,
+  });
 
-  const listQuery = { ...query, status: statusFilter };
-  const successQuery = { ...query, status: PAYMENT_STATUS.SUCCESS };
-  const reversedQuery = { ...query, status: PAYMENT_STATUS.REVERSED };
+  const effectiveFilters = {};
+  if (query.paymentMethod) {
+    effectiveFilters.paymentMethod = query.paymentMethod;
+    delete query.paymentMethod;
+  }
+  if (query.paymentDate) {
+    effectiveFilters.paymentDate = query.paymentDate;
+  }
 
-  const [successBreakdown, payments, reversedCount, successCount] = await Promise.all([
-    getPaymentMethodBreakdown(successQuery),
+  const listQuery = { ...query };
+  if (decodedCursor?.paymentDate && decodedCursor?.createdAt && decodedCursor?._id) {
+    listQuery.$or = [
+      { paymentDate: { $lt: new Date(decodedCursor.paymentDate) } },
+      {
+        paymentDate: new Date(decodedCursor.paymentDate),
+        createdAt: { $lt: new Date(decodedCursor.createdAt) },
+      },
+      {
+        paymentDate: new Date(decodedCursor.paymentDate),
+        createdAt: new Date(decodedCursor.createdAt),
+        _id: { $lt: decodedCursor._id },
+      },
+    ];
+  }
+
+  const [successBreakdown, paymentRows, effectiveContext, rawReversedCount] = await Promise.all([
+    getPaymentMethodBreakdown({ ...query, status: PAYMENT_STATUS.SUCCESS }),
     Payment.find(listQuery)
       .populate("customer", "name passbookNumber phone")
       .populate("scheme", "enrollmentNumber schemeName status")
       .populate("collectedBy", "name role")
-      .sort({ paymentDate: -1, createdAt: -1 })
-      .limit(Math.min(Number(scopedFilters.limit) || 200, 500))
+      .sort({ paymentDate: -1, createdAt: -1, _id: -1 })
+      .limit(limit + 1)
       .lean(),
-    Payment.countDocuments(reversedQuery),
-    Payment.countDocuments(successQuery),
+    loadEffectivePaymentContext(query),
+    Payment.countDocuments({ ...query, status: PAYMENT_STATUS.REVERSED }),
   ]);
+
+  const enriched = await enrichPaymentsWithEffectiveView(paymentRows);
+  const mappedPayments = enriched
+    .filter(({ view }) => {
+      if (statusFilter === PAYMENT_STATUS.REVERSED) {
+        return !view.effectiveLedger;
+      }
+      if (statusFilter === PAYMENT_STATUS.SUCCESS) {
+        return Boolean(view.effectiveLedger);
+      }
+      return true;
+    })
+    .map(({ payment, latest }) =>
+      mapCollectionPayment(payment, applyEffectivePaymentRow(payment, latest))
+    );
+
+  const paymentPage = buildCursorPage(mappedPayments, {
+    limit,
+    getCursorValue: (row) => ({
+      paymentDate: row.paymentDate,
+      createdAt: row.createdAt || row.paymentDate,
+      _id: row._id,
+    }),
+  });
+
+  const effectiveEntries = effectiveContext.entries.filter(({ ledger, payment }) => {
+    if (effectiveFilters.paymentMethod && ledger.paymentMethod !== effectiveFilters.paymentMethod) {
+      return false;
+    }
+    if (effectiveFilters.paymentDate) {
+      const timestamp = new Date(ledger.paymentDate).getTime();
+      if (
+        effectiveFilters.paymentDate.$gte &&
+        timestamp < effectiveFilters.paymentDate.$gte.getTime()
+      ) {
+        return false;
+      }
+      if (
+        effectiveFilters.paymentDate.$lte &&
+        timestamp > effectiveFilters.paymentDate.$lte.getTime()
+      ) {
+        return false;
+      }
+    }
+    if (statusFilter === PAYMENT_STATUS.REVERSED) {
+      return false;
+    }
+    if (statusFilter === PAYMENT_STATUS.SUCCESS) {
+      return true;
+    }
+    return payment.status === statusFilter;
+  });
 
   const methodTotals = {
     CASH: sumMethod(successBreakdown, PAYMENT_METHODS.CASH),
@@ -128,62 +222,129 @@ const getCollectionReport = async (filters = {}, actor) => {
     CARD: sumMethod(successBreakdown, PAYMENT_METHODS.CARD),
   };
 
+  const effectivelyReversedCount =
+    effectiveContext.payments.length - effectiveContext.entries.length;
+
   return {
     from: range.from || null,
     to: range.to || null,
-    totalCollection: Object.values(methodTotals).reduce((s, v) => s + v, 0),
+    totalCollection: Object.values(methodTotals).reduce((sum, value) => sum + value, 0),
     methodTotals,
-    successPaymentCount: successCount,
-    reversedPaymentCount: reversedCount,
-    payments: payments.map(mapCollectionPayment),
+    successPaymentCount: effectiveEntries.length,
+    reversedPaymentCount: rawReversedCount + effectivelyReversedCount,
+    payments: paymentPage.items,
+    pageInfo: paymentPage.pageInfo,
   };
 };
 
 const getStaffPerformanceReport = async (filters = {}) => {
   const { query, range } = buildBasePaymentQuery(filters);
-  const successQuery = { ...query, status: PAYMENT_STATUS.SUCCESS };
 
   const staffQuery = { role: USER_ROLES.STAFF, status: "ACTIVE" };
   if (filters.staffId) {
     staffQuery._id = toObjectId(filters.staffId, "staff id");
   }
 
+  const effectiveFilters = {};
+  if (query.paymentDate) {
+    effectiveFilters.paymentDate = query.paymentDate;
+  }
+  if (query.paymentMethod) {
+    effectiveFilters.paymentMethod = query.paymentMethod;
+    delete query.paymentMethod;
+  }
+
   const staffUsers = await User.find(staffQuery).sort({ name: 1 }).lean();
-  const profiles = await StaffProfile.find({ user: { $in: staffUsers.map((s) => s._id) } }).lean();
-  const profileMap = new Map(profiles.map((p) => [String(p.user), p]));
+  const [profiles, effectiveContext] = await Promise.all([
+    StaffProfile.find({ user: { $in: staffUsers.map((staff) => staff._id) } }).lean(),
+    loadEffectivePaymentContext(query),
+  ]);
+
+  const profileMap = new Map(profiles.map((profile) => [String(profile.user), profile]));
+  const methodTotalsByStaff = new Map();
+  const recentByStaff = new Map();
+
+  for (const { payment, ledger } of effectiveContext.entries) {
+    if (effectiveFilters.paymentMethod && ledger.paymentMethod !== effectiveFilters.paymentMethod) {
+      continue;
+    }
+    if (effectiveFilters.paymentDate) {
+      const timestamp = new Date(ledger.paymentDate).getTime();
+      if (
+        effectiveFilters.paymentDate.$gte &&
+        timestamp < effectiveFilters.paymentDate.$gte.getTime()
+      ) {
+        continue;
+      }
+      if (
+        effectiveFilters.paymentDate.$lte &&
+        timestamp > effectiveFilters.paymentDate.$lte.getTime()
+      ) {
+        continue;
+      }
+    }
+
+    const staffId = String(payment.collectedBy);
+    const methodMap = methodTotalsByStaff.get(staffId) || new Map();
+    const methodRow = methodMap.get(ledger.paymentMethod) || { total: 0, count: 0 };
+    methodRow.total += ledger.amount;
+    methodRow.count += 1;
+    methodMap.set(ledger.paymentMethod, methodRow);
+    methodTotalsByStaff.set(staffId, methodMap);
+
+    const recentBucket = recentByStaff.get(staffId) || [];
+    recentBucket.push({ payment, ledger });
+    recentByStaff.set(staffId, recentBucket);
+  }
 
   const staffList = await Promise.all(
     staffUsers.map(async (staff) => {
-      const staffId = staff._id;
-      const staffFilter = { ...successQuery, collectedBy: staffId };
-      const [breakdown, cashSummary, recentPayments, submissionAgg] = await Promise.all([
-        getPaymentMethodBreakdown(staffFilter),
-        getStaffCashInHand(staffId),
-        Payment.find(staffFilter)
-          .populate("customer", "name passbookNumber")
-          .populate("scheme", "enrollmentNumber")
-          .sort({ paymentDate: -1 })
-          .limit(5)
-          .lean(),
+      const staffId = String(staff._id);
+      const methodMap = methodTotalsByStaff.get(staffId) || new Map();
+      const breakdown = Array.from(methodMap.entries()).map(([paymentMethod, value]) => ({
+        paymentMethod,
+        total: value.total,
+        count: value.count,
+      }));
+
+      const [cashSummary, submissionAgg] = await Promise.all([
+        getStaffCashInHand(staff._id),
         CashSubmission.aggregate([
-          { $match: { staff: staffId } },
+          { $match: { staff: staff._id } },
           { $group: { _id: null, total: { $sum: "$submittedAmount" } } },
         ]),
       ]);
+
+      const recentPaymentsRaw = (recentByStaff.get(staffId) || [])
+        .sort(
+          (left, right) =>
+            new Date(right.ledger.paymentDate).getTime() -
+            new Date(left.ledger.paymentDate).getTime()
+        )
+        .slice(0, 5)
+        .map(({ payment, ledger }) =>
+          mapCollectionPayment(payment, {
+            displayAmount: ledger.amount,
+            displayPaymentMethod: ledger.paymentMethod,
+            displayPaymentDate: ledger.paymentDate,
+            effectiveAmount: ledger.amount,
+            effectivePaymentMethod: ledger.paymentMethod,
+            isEffectivelyReversed: false,
+          })
+        );
 
       const cashCollected = sumMethod(breakdown, PAYMENT_METHODS.CASH);
       const onlineCollected =
         sumMethod(breakdown, PAYMENT_METHODS.UPI) +
         sumMethod(breakdown, PAYMENT_METHODS.BANK) +
         sumMethod(breakdown, PAYMENT_METHODS.CARD);
-      const totalCollected = breakdown.reduce((s, r) => s + r.total, 0);
-      const paymentCount = breakdown.reduce((s, r) => s + r.count, 0);
+      const totalCollected = breakdown.reduce((sum, row) => sum + row.total, 0);
+      const paymentCount = breakdown.reduce((sum, row) => sum + row.count, 0);
       const submittedCash = submissionAgg[0]?.total || 0;
-
-      const profile = profileMap.get(String(staffId));
+      const profile = profileMap.get(staffId);
 
       return {
-        staffUserId: staffId,
+        staffUserId: staff._id,
         name: staff.name,
         phone: staff.phone,
         employeeCode: profile?.employeeCode || "",
@@ -196,7 +357,7 @@ const getStaffPerformanceReport = async (filters = {}) => {
         submittedCash,
         submittedCashAllTime: cashSummary.cashSubmitted,
         pendingCash: cashSummary.cashInHand,
-        recentPayments: recentPayments.map(mapCollectionPayment),
+        recentPayments: recentPaymentsRaw,
       };
     })
   );
@@ -233,9 +394,13 @@ const getSchemeReport = async (filters = {}) => {
     if (matRange.to) query.maturityDate.$lte = matRange.to;
   }
 
-  let customerIds = null;
+  const { limit, cursor: decodedCursor } = parseCursorPagination(filters, {
+    maxLimit: 200,
+    defaultLimit: 50,
+  });
+
   if (filters.search?.trim()) {
-    const term = filters.search.trim();
+    const term = parseSafeSearchTerm(filters.search, { label: "search" });
     const customers = await Customer.find({
       $or: [
         { name: { $regex: term, $options: "i" } },
@@ -243,44 +408,76 @@ const getSchemeReport = async (filters = {}) => {
         { passbookNumber: { $regex: term, $options: "i" } },
       ],
     }).select("_id");
-    customerIds = customers.map((c) => c._id);
-    query.customer = { $in: customerIds };
+    query.customer = { $in: customers.map((customer) => customer._id) };
   }
 
-  const schemes = await Scheme.find(query).sort({ maturityDate: 1 }).limit(500).lean();
-  const customerMap = new Map();
-  const uniqueCustomerIds = [...new Set(schemes.map((s) => String(s.customer)))];
-  const customers = await Customer.find({ _id: { $in: uniqueCustomerIds } }).lean();
-  customers.forEach((c) => customerMap.set(String(c._id), c));
+  const listQuery = { ...query };
+  if (decodedCursor?.maturityDate && decodedCursor?.createdAt && decodedCursor?._id) {
+    listQuery.$or = [
+      { maturityDate: { $gt: new Date(decodedCursor.maturityDate) } },
+      {
+        maturityDate: new Date(decodedCursor.maturityDate),
+        createdAt: { $lt: new Date(decodedCursor.createdAt) },
+      },
+      {
+        maturityDate: new Date(decodedCursor.maturityDate),
+        createdAt: new Date(decodedCursor.createdAt),
+        _id: { $gt: decodedCursor._id },
+      },
+    ];
+  }
 
-  const items = await Promise.all(
-    schemes.map(async (scheme) => {
-      const enriched = await enrichScheme(scheme);
-      const customer = customerMap.get(String(scheme.customer));
-      return {
-        schemeId: scheme._id,
-        customerId: customer?._id || scheme.customer,
-        customerName: customer?.name || "—",
-        phone: customer?.phone || "—",
-        passbookNumber: customer?.passbookNumber || "—",
-        enrollmentNumber: enriched.enrollmentNumber,
-        schemeName: enriched.schemeName,
-        status: enriched.status,
-        totalPaid: enriched.totalPaid,
-        remainingAllowedPayment: enriched.remainingAllowedPayment,
-        startDate: enriched.startDate,
-        sixMonthDate: enriched.sixMonthDate,
-        maturityDate: enriched.maturityDate,
-        statusHistorySummary: (enriched.statusHistory || []).map((h) => ({
-          status: h.status,
-          changedAt: h.changedAt,
-          notes: h.notes || "",
-        })),
-      };
-    })
-  );
+  const schemes = await Scheme.find(listQuery)
+    .sort({ maturityDate: 1, createdAt: -1, _id: 1 })
+    .limit(limit + 1)
+    .lean();
 
-  return { items, count: items.length };
+  const uniqueCustomerIds = [...new Set(schemes.map((scheme) => String(scheme.customer)))];
+  const [customers, limitSummaries] = await Promise.all([
+    Customer.find({ _id: { $in: uniqueCustomerIds } }).lean(),
+    getSchemeLimitSummariesBatch(schemes.map((scheme) => scheme._id)),
+  ]);
+  const customerMap = new Map(customers.map((customer) => [String(customer._id), customer]));
+
+  const items = schemes.map((scheme) => {
+    const summary = limitSummaries.get(String(scheme._id));
+    const customer = customerMap.get(String(scheme.customer));
+    return {
+      schemeId: scheme._id,
+      customerId: customer?._id || scheme.customer,
+      customerName: customer?.name || "—",
+      phone: customer?.phone || "—",
+      passbookNumber: customer?.passbookNumber || "—",
+      enrollmentNumber: scheme.enrollmentNumber,
+      schemeName: scheme.schemeName,
+      status: scheme.status,
+      totalPaid: summary?.totalPaid ?? 0,
+      remainingAllowedPayment: summary?.remainingAllowedPayment ?? 0,
+      startDate: scheme.startDate,
+      sixMonthDate: scheme.sixMonthDate,
+      maturityDate: scheme.maturityDate,
+      statusHistorySummary: (scheme.statusHistory || []).map((entry) => ({
+        status: entry.status,
+        changedAt: entry.changedAt,
+        notes: entry.notes || "",
+      })),
+    };
+  });
+
+  const page = buildCursorPage(items, {
+    limit,
+    getCursorValue: (row) => ({
+      maturityDate: row.maturityDate,
+      createdAt: row.startDate,
+      _id: row.schemeId,
+    }),
+  });
+
+  return {
+    items: page.items,
+    count: page.items.length,
+    pageInfo: page.pageInfo,
+  };
 };
 
 const getMaturityCalendar = async (filters = {}) => {
@@ -311,8 +508,7 @@ const getMaturityCalendar = async (filters = {}) => {
   const customerMap = new Map(customers.map((c) => [String(c._id), c]));
   const today = startOfDay(new Date());
 
-  const buildEntry = async (scheme) => {
-    const limit = await getSchemeLimitSummary(scheme._id);
+  const buildEntry = (scheme, limitSummary) => {
     const customer = customerMap.get(String(scheme.customer));
     const maturity = new Date(scheme.maturityDate);
     const daysRemaining = Math.ceil(
@@ -326,7 +522,7 @@ const getMaturityCalendar = async (filters = {}) => {
       passbookNumber: customer?.passbookNumber || "—",
       enrollmentNumber: scheme.enrollmentNumber,
       maturityDate: scheme.maturityDate,
-      totalPaid: limit.totalPaid,
+      totalPaid: limitSummary?.totalPaid ?? 0,
       status: scheme.status,
       daysRemaining,
       monthKey: dayjs(maturity).format("YYYY-MM"),
@@ -334,12 +530,15 @@ const getMaturityCalendar = async (filters = {}) => {
     };
   };
 
-  const entries = await Promise.all(
-    schemes.map((scheme) => buildEntry(scheme))
+  const allSchemes = [...schemes, ...pendingSchemes];
+  const limitSummaries = await getSchemeLimitSummariesBatch(allSchemes.map((scheme) => scheme._id));
+
+  const entries = schemes.map((scheme) =>
+    buildEntry(scheme, limitSummaries.get(String(scheme._id)))
   );
 
-  const pendingEntries = await Promise.all(
-    pendingSchemes.map((scheme) => buildEntry(scheme))
+  const pendingEntries = pendingSchemes.map((scheme) =>
+    buildEntry(scheme, limitSummaries.get(String(scheme._id)))
   );
 
   const groupedByMonth = entries.reduce((acc, entry) => {
@@ -359,16 +558,21 @@ const getMaturityCalendar = async (filters = {}) => {
   };
 };
 
-const getCustomerLedger = async (customerId) => {
-  const detail = await getCustomerDetail(customerId);
+const getCustomerLedger = async (customerId, actor = null) => {
+  const detail = await getCustomerDetail(customerId, actor);
   const allPayments = await Payment.find({ customer: customerId })
     .populate("scheme", "enrollmentNumber schemeName status")
     .populate("collectedBy", "name role")
     .sort({ paymentDate: -1 })
     .lean();
 
-  const successPayments = allPayments.filter((p) => p.status === PAYMENT_STATUS.SUCCESS);
-  const reversedPayments = allPayments.filter((p) => p.status === PAYMENT_STATUS.REVERSED);
+  const enriched = await enrichPaymentsWithEffectiveView(allPayments);
+  const successPayments = enriched
+    .filter(({ view }) => view.effectiveLedger)
+    .map(({ payment, latest }) => ({ payment, latest }));
+  const reversedPayments = enriched
+    .filter(({ view }) => !view.effectiveLedger)
+    .map(({ payment, latest }) => ({ payment, latest }));
 
   const settlementByScheme = new Map(
     detail.schemes.map((scheme) => [
@@ -386,16 +590,20 @@ const getCustomerLedger = async (customerId) => {
     status: scheme.status,
     totalPaid: scheme.totalPaid,
     payments: successPayments
-      .filter((p) => String(p.scheme?._id || p.scheme) === String(scheme._id))
-      .map(mapCollectionPayment),
+      .filter(({ payment }) => String(payment.scheme?._id || payment.scheme) === String(scheme._id))
+      .map(({ payment, latest }) =>
+        mapCollectionPayment(payment, applyEffectivePaymentRow(payment, latest))
+      ),
     reversedPayments: reversedPayments
-      .filter((p) => String(p.scheme?._id || p.scheme) === String(scheme._id))
-      .map(mapCollectionPayment),
+      .filter(({ payment }) => String(payment.scheme?._id || payment.scheme) === String(scheme._id))
+      .map(({ payment, latest }) =>
+        mapCollectionPayment(payment, applyEffectivePaymentRow(payment, latest))
+      ),
     settlements: settlementByScheme.get(String(scheme._id)) || [],
   }));
 
   const totalSettled = settlements.reduce((sum, entry) => sum + (entry.amount || 0), 0);
-  const totalPaidAllSchemes = detail.schemes.reduce((sum, s) => sum + (s.totalPaid || 0), 0);
+  const totalPaidAllSchemes = detail.schemes.reduce((sum, scheme) => sum + (scheme.totalPaid || 0), 0);
 
   return {
     customer: detail.customer,
@@ -406,16 +614,23 @@ const getCustomerLedger = async (customerId) => {
     totalSettled,
     netBalance: totalPaidAllSchemes - totalSettled,
     paymentsByScheme,
-    receipts: successPayments.map((p) => ({
-      receiptNumber: p.receiptNumber,
-      amount: p.amount,
-      paymentDate: p.paymentDate,
-      enrollmentNumber: p.scheme?.enrollmentNumber,
-    })),
+    receipts: successPayments.map(({ payment, latest }) => {
+      const effectiveMeta = applyEffectivePaymentRow(payment, latest);
+      return {
+        receiptNumber: payment.receiptNumber,
+        amount: effectiveMeta.displayAmount,
+        paymentDate: effectiveMeta.displayPaymentDate,
+        enrollmentNumber: payment.scheme?.enrollmentNumber,
+      };
+    }),
     paymentHistory: detail.paymentHistory,
     settlementHistory: settlements,
-    statusHistory: detail.schemes.flatMap((s) =>
-      (s.statusHistory || []).map((h) => ({ schemeId: s._id, enrollmentNumber: s.enrollmentNumber, ...h }))
+    statusHistory: detail.schemes.flatMap((scheme) =>
+      (scheme.statusHistory || []).map((entry) => ({
+        schemeId: scheme._id,
+        enrollmentNumber: scheme.enrollmentNumber,
+        ...entry,
+      }))
     ),
   };
 };
@@ -433,12 +648,17 @@ const getSchemeLedger = async (schemeId) => {
     .sort({ paymentDate: -1 })
     .lean();
 
-  const successfulPayments = payments
-    .filter((p) => p.status === PAYMENT_STATUS.SUCCESS)
-    .map(mapCollectionPayment);
-  const reversedPayments = payments
-    .filter((p) => p.status === PAYMENT_STATUS.REVERSED)
-    .map(mapCollectionPayment);
+  const enriched = await enrichPaymentsWithEffectiveView(payments);
+  const successfulPayments = enriched
+    .filter(({ view }) => view.effectiveLedger)
+    .map(({ payment, latest }) =>
+      mapCollectionPayment(payment, applyEffectivePaymentRow(payment, latest))
+    );
+  const reversedPayments = enriched
+    .filter(({ view }) => !view.effectiveLedger)
+    .map(({ payment, latest }) =>
+      mapCollectionPayment(payment, applyEffectivePaymentRow(payment, latest))
+    );
 
   const settlements = (scheme.statusHistory || [])
     .filter((event) => SETTLEMENT_STATUSES.includes(event.status))
@@ -472,10 +692,10 @@ const getSchemeLedger = async (schemeId) => {
     successfulPayments,
     reversedPayments,
     settlements,
-    receipts: successfulPayments.map((p) => ({
-      receiptNumber: p.receiptNumber,
-      amount: p.amount,
-      paymentDate: p.paymentDate,
+    receipts: successfulPayments.map((payment) => ({
+      receiptNumber: payment.receiptNumber,
+      amount: payment.amount,
+      paymentDate: payment.paymentDate,
     })),
     totalPaid: scheme.totalPaid,
     totalSettled,

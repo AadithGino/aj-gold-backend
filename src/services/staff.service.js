@@ -21,6 +21,8 @@ const {
 } = require("./cash.service");
 const { getStaffCashInHand } = require("./staffCash.service");
 const { logAudit } = require("./audit.service");
+const { assertPrivilegedPassword } = require("../constants/credentialPolicies");
+const { generateTemporaryPassword } = require("./auth.service");
 const {
   startOfDay,
   endOfDay,
@@ -29,6 +31,8 @@ const {
   startOfYear,
   parseDateRange,
 } = require("../utils/date");
+const { parseSafeSearchTerm } = require("../utils/safeSearch");
+const { parseCursorPagination, buildCursorPage } = require("../utils/pagination");
 
 const sanitizeStaffUser = (user) => ({
   _id: user._id,
@@ -78,7 +82,9 @@ const createStaff = async (
     throw new ApiError(409, "Employee code already exists.");
   }
 
-  const passwordHash = await bcrypt.hash(password, 10);
+  const resolvedPassword = password?.trim() || generateTemporaryPassword();
+  assertPrivilegedPassword(resolvedPassword);
+  const passwordHash = await bcrypt.hash(resolvedPassword, 10);
   const session = await mongoose.startSession();
 
   try {
@@ -179,6 +185,19 @@ const updateStaff = async (staffUserId, updates, actor) => {
     };
   }
 
+  if (updates.permissions) {
+    await logAudit({
+      actor: actor._id,
+      actorRole: actor.role,
+      action: AUDIT_ACTIONS.STAFF_PERMISSIONS_UPDATED,
+      targetType: "User",
+      targetId: user._id,
+      previousValue: { permissions: previousValue.permissions },
+      newValue: { permissions: profile.permissions },
+      notes: "Staff permissions updated",
+    });
+  }
+
   if (updates.notes !== undefined) {
     profile.notes = updates.notes?.trim() || "";
   }
@@ -250,9 +269,9 @@ const buildStaffListItem = async (user, profile) => {
   };
 };
 
-const listStaff = async ({ search = "" }) => {
+const listStaff = async ({ search = "", cursor, limit } = {}) => {
   const query = { role: USER_ROLES.STAFF };
-  const trimmedSearch = search.trim();
+  const trimmedSearch = parseSafeSearchTerm(search, { label: "search" });
 
   if (trimmedSearch) {
     const profiles = await StaffProfile.find({
@@ -268,7 +287,24 @@ const listStaff = async ({ search = "" }) => {
     ];
   }
 
-  const users = await User.find(query).sort({ createdAt: -1 });
+  const { limit: resolvedLimit, cursor: decodedCursor } = parseCursorPagination(
+    { cursor, limit },
+    { maxLimit: 100, defaultLimit: 50 }
+  );
+
+  if (decodedCursor?.createdAt && decodedCursor?._id) {
+    query.$and = query.$and || [];
+    query.$and.push({
+      $or: [
+        { createdAt: { $lt: new Date(decodedCursor.createdAt) } },
+        { createdAt: new Date(decodedCursor.createdAt), _id: { $lt: decodedCursor._id } },
+      ],
+    });
+  }
+
+  const users = await User.find(query)
+    .sort({ createdAt: -1, _id: -1 })
+    .limit(resolvedLimit + 1);
   const profiles = await StaffProfile.find({ user: { $in: users.map((user) => user._id) } });
   const profileMap = new Map(profiles.map((profile) => [profile.user.toString(), profile]));
 
@@ -278,7 +314,10 @@ const listStaff = async ({ search = "" }) => {
       .map((user) => buildStaffListItem(user, profileMap.get(user._id.toString())))
   );
 
-  return items;
+  return buildCursorPage(items, {
+    limit: resolvedLimit,
+    getCursorValue: (row) => ({ createdAt: row.createdAt, _id: row._id }),
+  });
 };
 
 const getStaffSummaryBuckets = async (staffUserId) => {

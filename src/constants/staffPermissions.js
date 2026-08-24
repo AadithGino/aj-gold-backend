@@ -1,35 +1,32 @@
 const DEFAULT_STAFF_PERMISSIONS = {
-  canCollectPayment: true,
-  canCreateCustomer: true,
-  canViewReports: true,
+  canCollectPayment: false,
+  canCreateCustomer: false,
+  canViewReports: false,
   canSubmitCash: false,
-  canMarkRedeemed: true,
+  canMarkRedeemed: false,
   canMarkClosed: false,
+  canFinalizeSettlement: false,
 };
+
+const STAFF_PERMISSION_KEYS = Object.keys(DEFAULT_STAFF_PERMISSIONS);
 
 const resolveStaffPermissions = (permissions = {}) => {
-  const stored =
-    permissions?.toObject?.() ||
-    permissions ||
-    {};
+  const stored = permissions?.toObject?.() || permissions || {};
+  const merged = { ...DEFAULT_STAFF_PERMISSIONS, ...stored };
 
-  return {
-    ...DEFAULT_STAFF_PERMISSIONS,
-    ...stored,
-    canMarkRedeemed: stored.canMarkRedeemed !== false,
-    canMarkClosed: stored.canMarkClosed === true,
-    canViewReports: stored.canViewReports !== false,
-    canCollectPayment: stored.canCollectPayment !== false,
-    canCreateCustomer: stored.canCreateCustomer !== false,
-    canSubmitCash: stored.canSubmitCash === true,
-  };
+  return Object.fromEntries(
+    STAFF_PERMISSION_KEYS.map((key) => [key, merged[key] === true])
+  );
 };
 
-const hasStaffPermission = (profile, permissionKey) =>
-  Boolean(resolveStaffPermissions(profile?.permissions)[permissionKey]);
+const hasStaffPermission = (profile, permissionKey) => {
+  if (!profile) return false;
+  return Boolean(resolveStaffPermissions(profile?.permissions)[permissionKey]);
+};
 
 module.exports = {
   DEFAULT_STAFF_PERMISSIONS,
+  STAFF_PERMISSION_KEYS,
   resolveStaffPermissions,
   hasStaffPermission,
 };

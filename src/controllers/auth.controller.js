@@ -2,7 +2,7 @@ const { login, me, logout } = require("../services/auth.service");
 const asyncHandler = require("../utils/asyncHandler");
 
 const loginController = asyncHandler(async (req, res) => {
-  const result = await login(req.body);
+  const result = await login(req.body, { ip: req.clientIp || req.ip });
   res.json({ success: true, data: result });
 });
 
@@ -16,4 +16,8 @@ const logoutController = asyncHandler(async (req, res) => {
   res.json({ success: true, data });
 });
 
-module.exports = { loginController, meController, logoutController };
+module.exports = {
+  loginController,
+  meController,
+  logoutController,
+};

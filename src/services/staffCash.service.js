@@ -1,14 +1,22 @@
 const mongoose = require("mongoose");
 const Payment = require("../models/payment.model");
+const PaymentCorrection = require("../models/paymentCorrection.model");
 const CashSubmission = require("../models/cashSubmission.model");
 const StaffProfile = require("../models/staffProfile.model");
 const {
   PAYMENT_METHODS,
   PAYMENT_STATUS,
   USER_ROLES,
+  CORRECTION_STATUS,
+  CASH_SUBMISSION_STATUS,
 } = require("../constants/enums");
 const ApiError = require("../utils/ApiError");
 const { ERROR_CODES } = require("../constants/errorCodes");
+const {
+  getLatestApprovedCorrectionsByPayment,
+  getEffectiveLedgerFields,
+} = require("../utils/paymentLedger");
+const { getStaffCustodyBalance } = require("./financialJournal.service");
 
 const toObjectId = (id, label = "id") => {
   if (id instanceof mongoose.Types.ObjectId) return id;
@@ -18,43 +26,76 @@ const toObjectId = (id, label = "id") => {
   return new mongoose.Types.ObjectId(id);
 };
 
-const getStaffCashCollected = async (staffId, session = null) => {
+const getStaffEffectiveCashCollected = async (staffId, session = null) => {
   const staffObjectId = toObjectId(staffId, "staff id");
-  const rows = await Payment.aggregate([
-    {
-      $match: {
-        collectedBy: staffObjectId,
-        paymentMethod: PAYMENT_METHODS.CASH,
-        status: PAYMENT_STATUS.SUCCESS,
-      },
-    },
-    { $group: { _id: null, total: { $sum: "$amount" } } },
-  ]).session(session || null);
+  const payments = await Payment.find({
+    collectedBy: staffObjectId,
+    collectedByRole: USER_ROLES.STAFF,
+  })
+    .session(session || null)
+    .lean();
 
-  return rows[0]?.total || 0;
+  if (!payments.length) return 0;
+
+  const paymentIds = payments.map((payment) => payment._id);
+  const corrections = await PaymentCorrection.find({
+    payment: { $in: paymentIds },
+    status: CORRECTION_STATUS.APPROVED,
+  })
+    .session(session || null)
+    .lean();
+
+  const latestByPayment = getLatestApprovedCorrectionsByPayment(corrections);
+  let total = 0;
+
+  for (const payment of payments) {
+    const ledger = getEffectiveLedgerFields(
+      payment,
+      latestByPayment.get(String(payment._id)) || null
+    );
+    if (ledger && ledger.paymentMethod === PAYMENT_METHODS.CASH && ledger.status !== PAYMENT_STATUS.REVERSED) {
+      total += ledger.amount;
+    }
+  }
+
+  return total;
 };
 
-const getStaffCashSubmitted = async (staffId, session = null) => {
+const getStaffCashCollected = async (staffId, session = null) =>
+  getStaffEffectiveCashCollected(staffId, session);
+
+const getStaffActiveCashSubmitted = async (staffId, session = null) => {
   const staffObjectId = toObjectId(staffId, "staff id");
   const rows = await CashSubmission.aggregate([
-    { $match: { staff: staffObjectId } },
+    {
+      $match: {
+        staff: staffObjectId,
+        status: CASH_SUBMISSION_STATUS.ACTIVE,
+      },
+    },
     { $group: { _id: null, total: { $sum: "$submittedAmount" } } },
   ]).session(session || null);
 
   return rows[0]?.total || 0;
 };
 
+const getStaffCashSubmitted = async (staffId, session = null) =>
+  getStaffActiveCashSubmitted(staffId, session);
+
 const getStaffCashInHand = async (staffId, session = null) => {
-  const [cashCollected, cashSubmitted] = await Promise.all([
-    getStaffCashCollected(staffId, session),
-    getStaffCashSubmitted(staffId, session),
+  const [cashCollected, cashSubmitted, journalCustodyBalance] = await Promise.all([
+    getStaffEffectiveCashCollected(staffId, session),
+    getStaffActiveCashSubmitted(staffId, session),
+    getStaffCustodyBalance(staffId, session),
   ]);
 
   return {
     staffId,
     cashCollected,
     cashSubmitted,
-    cashInHand: cashCollected - cashSubmitted,
+    cashInHand: journalCustodyBalance,
+    aggregateCashInHand: cashCollected - cashSubmitted,
+    journalCustodyBalance,
   };
 };
 
@@ -109,7 +150,7 @@ const assertNoNegativeCashAfterPaymentChange = async ({
   if (!staffId) return;
 
   const summary = await getStaffCashInHand(staffId, session);
-  let adjusted = summary.cashInHand;
+  let adjusted = summary.aggregateCashInHand;
 
   if (previousMethod === PAYMENT_METHODS.CASH) {
     adjusted -= previousAmount;
@@ -127,7 +168,9 @@ const assertNoNegativeCashAfterPaymentChange = async ({
 };
 
 module.exports = {
+  getStaffEffectiveCashCollected,
   getStaffCashCollected,
+  getStaffActiveCashSubmitted,
   getStaffCashSubmitted,
   getStaffCashInHand,
   lockStaffCashProfile,

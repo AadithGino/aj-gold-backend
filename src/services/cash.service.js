@@ -8,6 +8,7 @@ const {
   USER_ROLES,
   AUDIT_ACTIONS,
   IDEMPOTENCY_OPERATIONS,
+  CASH_SUBMISSION_STATUS,
 } = require("../constants/enums");
 const ApiError = require("../utils/ApiError");
 const { ERROR_CODES } = require("../constants/errorCodes");
@@ -19,12 +20,24 @@ const {
   checkIdempotencyReplay,
   saveIdempotencyResult,
 } = require("./idempotency.service");
+const { buildCashSubmissionIntent } = require("../utils/idempotencyPayload");
+const { recordStaffCashSubmitted, recordCashSubmissionReversal } = require("../utils/journalRecording");
+const { NOTIFICATION_TYPES } = require("../models/notification.model");
+const { enqueueOutboxEvent } = require("./outbox.service");
+const { OUTBOX_TOPICS } = require("../models/outboxEvent.model");
 const {
   getStaffCashInHand,
   lockStaffCashProfile,
   assertStaffCashInHandSufficient,
   assertStaffUser,
 } = require("./staffCash.service");
+const {
+  aggregateEffectiveBreakdown,
+  aggregateEffectiveTotal,
+  getEffectiveTotalPaidTillNow,
+  getEffectiveReceiptFields,
+} = require("../utils/effectiveReadModel");
+const { getLatestApprovedCorrection } = require("../utils/effectivePayment");
 
 const toObjectId = (id, label = "id") => {
   if (id instanceof mongoose.Types.ObjectId) return id;
@@ -36,91 +49,50 @@ const toObjectId = (id, label = "id") => {
 
 const getStaffCashCollected = async (staffId) => {
   const staffObjectId = toObjectId(staffId, "staff id");
-  const result = await Payment.aggregate([
-    {
-      $match: {
-        collectedBy: staffObjectId,
-        paymentMethod: PAYMENT_METHODS.CASH,
-        status: PAYMENT_STATUS.SUCCESS,
-      },
-    },
-    { $group: { _id: null, total: { $sum: "$amount" } } },
-  ]);
-
-  return result[0]?.total || 0;
+  return aggregateEffectiveTotal(
+    { collectedBy: staffObjectId },
+    { paymentMethod: PAYMENT_METHODS.CASH }
+  );
 };
 
 const getStaffCashSubmitted = async (staffId) => {
   const staffObjectId = toObjectId(staffId, "staff id");
   const result = await CashSubmission.aggregate([
-    { $match: { staff: staffObjectId } },
+    { $match: { staff: staffObjectId, status: CASH_SUBMISSION_STATUS.ACTIVE } },
     { $group: { _id: null, total: { $sum: "$submittedAmount" } } },
   ]);
 
   return result[0]?.total || 0;
 };
 
-const getAdminCashCollected = async () => {
-  const result = await Payment.aggregate([
-    {
-      $match: {
-        collectedByRole: USER_ROLES.ADMIN,
-        paymentMethod: PAYMENT_METHODS.CASH,
-        status: PAYMENT_STATUS.SUCCESS,
-      },
-    },
-    { $group: { _id: null, total: { $sum: "$amount" } } },
-  ]);
-
-  return result[0]?.total || 0;
-};
+const getAdminCashCollected = async () =>
+  aggregateEffectiveTotal(
+    { collectedByRole: USER_ROLES.ADMIN },
+    { paymentMethod: PAYMENT_METHODS.CASH }
+  );
 
 const getPaymentMethodBreakdown = async (filter = {}) => {
-  const match = { status: PAYMENT_STATUS.SUCCESS, ...filter };
+  const match = { ...filter };
+  const effectiveFilters = {};
+
   if (match.collectedBy) {
     match.collectedBy = toObjectId(match.collectedBy, "staff id");
   }
-
-  const breakdown = await Payment.aggregate([
-    { $match: match },
-    {
-      $group: {
-        _id: "$paymentMethod",
-        total: { $sum: "$amount" },
-        count: { $sum: 1 },
-      },
-    },
-    { $sort: { _id: 1 } },
-  ]);
-
-  return breakdown.map((row) => ({
-    paymentMethod: row._id,
-    total: row.total,
-    count: row.count,
-  }));
-};
-
-const getTotalPaidTillNow = async (payment, session = null) => {
-  const schemeId = payment.scheme._id || payment.scheme;
-  const payments = await Payment.find({
-    scheme: schemeId,
-    status: PAYMENT_STATUS.SUCCESS,
-  })
-    .select("amount paymentDate createdAt _id")
-    .sort({ paymentDate: 1, createdAt: 1, _id: 1 })
-    .session(session || null)
-    .lean();
-
-  const currentId = String(payment._id);
-  let total = 0;
-  for (const row of payments) {
-    total += row.amount;
-    if (String(row._id) === currentId) {
-      break;
-    }
+  if (match.paymentMethod) {
+    effectiveFilters.paymentMethod = match.paymentMethod;
+    delete match.paymentMethod;
   }
-  return total;
+  if (match.paymentDate) {
+    effectiveFilters.paymentDate = match.paymentDate;
+    delete match.paymentDate;
+  }
+  delete match.status;
+
+  return aggregateEffectiveBreakdown(match, effectiveFilters);
 };
+
+const getTotalPaidTillNow = async (payment, session = null) =>
+  getEffectiveTotalPaidTillNow(payment, session);
 
 const getReceiptDisplayData = async (paymentId, session = null) => {
   const payment = await Payment.findById(paymentId)
@@ -133,6 +105,8 @@ const getReceiptDisplayData = async (paymentId, session = null) => {
     return null;
   }
 
+  const latestCorrection = await getLatestApprovedCorrection(payment._id, session);
+  const effectiveFields = getEffectiveReceiptFields(payment, latestCorrection);
   const totalPaidTillNow = await getTotalPaidTillNow(payment, session);
 
   return {
@@ -140,38 +114,31 @@ const getReceiptDisplayData = async (paymentId, session = null) => {
     passbookNumber: payment.customer.passbookNumber,
     enrollmentNumber: payment.scheme.enrollmentNumber,
     receiptNumber: payment.receiptNumber,
-    amount: payment.amount,
-    paymentMethod: payment.paymentMethod,
+    amount: effectiveFields?.amount ?? payment.amount,
+    paymentMethod: effectiveFields?.paymentMethod ?? payment.paymentMethod,
     collectedBy: payment.collectedBy.name,
-    paymentDate: payment.paymentDate,
+    paymentDate: effectiveFields?.paymentDate ?? payment.paymentDate,
     totalPaidTillNow,
     schemeStatus: payment.scheme.status,
+    sourceAmount: payment.amount,
+    sourcePaymentMethod: payment.paymentMethod,
   };
 };
 
 const getStaffCollectionTotal = async (staffId, from, to) => {
   const staffObjectId = toObjectId(staffId, "staff id");
-  const match = {
-    collectedBy: staffObjectId,
-    status: PAYMENT_STATUS.SUCCESS,
-  };
-
+  const filters = {};
   if (from || to) {
-    match.paymentDate = {};
+    filters.paymentDate = {};
     if (from) {
-      match.paymentDate.$gte = from;
+      filters.paymentDate.$gte = from;
     }
     if (to) {
-      match.paymentDate.$lte = to;
+      filters.paymentDate.$lte = to;
     }
   }
 
-  const result = await Payment.aggregate([
-    { $match: match },
-    { $group: { _id: null, total: { $sum: "$amount" } } },
-  ]);
-
-  return result[0]?.total || 0;
+  return aggregateEffectiveTotal({ collectedBy: staffObjectId }, filters);
 };
 
 const getStaffPaymentHistory = async (staffId, { from, to, limit = 50, paymentMethod } = {}) => {
@@ -226,12 +193,7 @@ const createCashSubmission = async (payload, actor) => {
     throw new ApiError(400, "Invalid submission date.");
   }
 
-  const idempotencyPayload = {
-    staff: payload.staff,
-    submittedAmount,
-    submissionDate: submissionDate.toISOString(),
-    notes: payload.notes?.trim() || "",
-  };
+  const idempotencyPayload = buildCashSubmissionIntent(payload, submittedAmount);
 
   const txnResult = await withTransaction(async (session) => {
     const replay = await checkIdempotencyReplay({
@@ -255,11 +217,21 @@ const createCashSubmission = async (payload, actor) => {
           submittedAmount,
           submissionDate,
           receivedBy: actor?.name || "Admin",
+          status: CASH_SUBMISSION_STATUS.ACTIVE,
           notes: payload.notes?.trim() || "",
           createdBy: actor._id,
         },
       ],
       { session }
+    );
+
+    await recordStaffCashSubmitted(
+      {
+        submission,
+        actor,
+        clientRequestId: payload.clientRequestId,
+      },
+      session
     );
 
     const cashSummary = await getStaffCashInHand(payload.staff, session);
@@ -303,6 +275,21 @@ const createCashSubmission = async (payload, actor) => {
       resourceId: submission._id,
       session,
     });
+
+    await enqueueOutboxEvent(
+      {
+        topic: OUTBOX_TOPICS.CASH_SUBMITTED,
+        dedupeKey: `cash-submitted:${submission._id}`,
+        payload: {
+          recipient: payload.staff,
+          type: NOTIFICATION_TYPES.CASH_SUBMITTED,
+          title: "Cash Submitted",
+          message: `Cash submission of ₹${submission.submittedAmount} recorded.`,
+          data: { submissionId: submission._id, submittedAmount: submission.submittedAmount },
+        },
+      },
+      session
+    );
 
     return { replay: false, submission, cashSummary };
   });
@@ -349,6 +336,118 @@ const listCashSubmissions = async ({ staffId, from, to } = {}) => {
     .select("-__v");
 };
 
+const reverseCashSubmission = async (submissionId, payload, actor) => {
+  if (actor.role !== USER_ROLES.ADMIN) {
+    throw new ApiError(403, "Only admin can reverse cash submissions.");
+  }
+
+  const reason = payload.reason?.trim();
+  if (!reason) {
+    throw new ApiError(400, "Reason is required.");
+  }
+
+  const idempotencyPayload = {
+    submissionId,
+    reason,
+    notes: payload.notes?.trim() || "",
+  };
+
+  const txnResult = await withTransaction(async (session) => {
+    const replay = await checkIdempotencyReplay({
+      clientRequestId: payload.clientRequestId,
+      operationType: IDEMPOTENCY_OPERATIONS.CASH_SUBMISSION_REVERSE,
+      requestPayload: idempotencyPayload,
+      session,
+    });
+    if (replay.replay) {
+      return { replay: true, response: replay.response };
+    }
+
+    const submission = await CashSubmission.findOneAndUpdate(
+      { _id: submissionId, status: CASH_SUBMISSION_STATUS.ACTIVE },
+      {
+        $set: {
+          status: CASH_SUBMISSION_STATUS.REVERSED,
+          reversedAt: new Date(),
+          reversedBy: actor._id,
+          reversalReason: reason,
+        },
+      },
+      { new: false, session }
+    );
+
+    if (!submission) {
+      const existing = await CashSubmission.findById(submissionId).session(session);
+      if (!existing) {
+        throw new ApiError(404, "Cash submission not found.");
+      }
+      if (existing.status === CASH_SUBMISSION_STATUS.REVERSED) {
+        throw new ApiError(409, "Cash submission is already reversed.", [], {
+          code: ERROR_CODES.CASH_SUBMISSION_ALREADY_REVERSED,
+          retryable: false,
+        });
+      }
+      throw new ApiError(409, "Cash submission cannot be reversed.", [], {
+        code: ERROR_CODES.CASH_SUBMISSION_ALREADY_REVERSED,
+        retryable: false,
+      });
+    }
+
+    await lockStaffCashProfile(submission.staff, session);
+
+    await recordCashSubmissionReversal(
+      {
+        submission,
+        actor,
+        clientRequestId: payload.clientRequestId,
+      },
+      session
+    );
+
+    await logAudit({
+      actor: actor._id,
+      actorRole: actor.role,
+      action: AUDIT_ACTIONS.CASH_SUBMISSION_REVERSED,
+      targetType: "CashSubmission",
+      targetId: submission._id,
+      newValue: {
+        reversal: true,
+        reason,
+        submittedAmount: submission.submittedAmount,
+        clientRequestId: payload.clientRequestId,
+      },
+      notes: payload.notes?.trim() || reason,
+      session,
+    });
+
+    const cashSummary = await getStaffCashInHand(submission.staff, session);
+    const response = { submissionId: submission._id, cashSummary };
+
+    await saveIdempotencyResult({
+      clientRequestId: replay.clientRequestId,
+      operationType: IDEMPOTENCY_OPERATIONS.CASH_SUBMISSION_REVERSE,
+      requestHash: replay.requestHash,
+      responsePayload: response,
+      actor,
+      resourceType: "CashSubmission",
+      resourceId: submission._id,
+      session,
+    });
+
+    return { replay: false, submission, cashSummary };
+  });
+
+  if (txnResult.replay) {
+    const submission = await CashSubmission.findById(txnResult.response.submissionId);
+    return { submission, cashSummary: txnResult.response.cashSummary };
+  }
+
+  return {
+    submission: txnResult.submission,
+    cashSummary: txnResult.cashSummary,
+  };
+};
+
 module.exports = {
   getStaffCashCollected,
   getStaffCashSubmitted,
@@ -360,5 +459,6 @@ module.exports = {
   getStaffPaymentHistory,
   getStaffCashSubmissionHistory,
   createCashSubmission,
+  reverseCashSubmission,
   listCashSubmissions,
 };

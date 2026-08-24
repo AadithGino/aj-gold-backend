@@ -21,7 +21,7 @@ const assertStaffReportAccess = async (user) => {
   if (user.role === USER_ROLES.STAFF) {
     const profile = await StaffProfile.findOne({ user: user._id });
     const perms = resolveStaffPermissions(profile?.permissions);
-    if (!perms.canViewReports && !perms.canCollectPayment) {
+    if (!perms.canViewReports) {
       throw new ApiError(403, "Staff does not have report access.");
     }
   }
@@ -44,32 +44,32 @@ const collectionsHandler = asyncHandler(async (req, res) => {
 });
 
 const staffPerformanceHandler = asyncHandler(async (req, res) => {
-  assertAdmin(req.user);
+  await assertStaffReportAccess(req.user);
   const data = await getStaffPerformanceReport(req.query);
   res.json({ success: true, data });
 });
 
 const cashPositionHandler = asyncHandler(async (req, res) => {
-  assertAdmin(req.user);
+  await assertStaffReportAccess(req.user);
   const data = await getCashPositionReport();
   res.json({ success: true, data });
 });
 
 const schemesHandler = asyncHandler(async (req, res) => {
-  assertAdmin(req.user);
+  await assertStaffReportAccess(req.user);
   const data = await getSchemeReport(req.query);
   res.json({ success: true, data });
 });
 
 const maturityCalendarHandler = asyncHandler(async (req, res) => {
-  assertAdmin(req.user);
+  await assertStaffReportAccess(req.user);
   const data = await getMaturityCalendar(req.query);
   res.json({ success: true, data });
 });
 
 const customerLedgerHandler = asyncHandler(async (req, res) => {
   await assertStaffReportAccess(req.user);
-  const data = await getCustomerLedger(req.params.customerId);
+  const data = await getCustomerLedger(req.params.customerId, req.user);
   res.json({ success: true, data });
 });
 

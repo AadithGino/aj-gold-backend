@@ -22,10 +22,17 @@ const { resolveStaffPermissions } = require("../constants/staffPermissions");
 const { getCashPositionSummary } = require("./cashPosition.service");
 const { enrichScheme } = require("./customer.service");
 const { getSchemeLimitSummary } = require("./paymentLimit.service");
+const {
+  aggregateEffectiveByStaff,
+  aggregateEffectiveHourly,
+  aggregateEffectiveTotal,
+  enrichPaymentsWithEffectiveView,
+  applyEffectivePaymentRow,
+} = require("../utils/effectiveReadModel");
 
 const APP_VERSION = "v1.0.0";
 
-const mapPaymentItem = (payment) => {
+const mapPaymentItem = (payment, effectiveMeta = null) => {
   const scheme =
     payment.scheme && typeof payment.scheme === "object"
       ? {
@@ -40,10 +47,10 @@ const mapPaymentItem = (payment) => {
 
   return {
     _id: payment._id,
-    amount: payment.amount,
-    paymentMethod: payment.paymentMethod,
+    amount: effectiveMeta?.displayAmount ?? payment.amount,
+    paymentMethod: effectiveMeta?.displayPaymentMethod ?? payment.paymentMethod,
     receiptNumber: payment.receiptNumber,
-    paymentDate: payment.paymentDate || payment.createdAt,
+    paymentDate: effectiveMeta?.displayPaymentDate ?? payment.paymentDate ?? payment.createdAt,
     customer: payment.customer,
     collectedBy: payment.collectedBy
       ? typeof payment.collectedBy === "object"
@@ -60,6 +67,13 @@ const mapPaymentItem = (payment) => {
     isLimitOverride: Boolean(payment.isLimitOverride),
     overrideReason: payment.overrideReason || null,
     createdAt: payment.createdAt,
+    ...(effectiveMeta
+      ? {
+          sourceAmount: payment.amount,
+          effectiveAmount: effectiveMeta.effectiveAmount,
+          isEffectivelyReversed: effectiveMeta.isEffectivelyReversed,
+        }
+      : {}),
   };
 };
 
@@ -107,31 +121,20 @@ const getAdminDashboard = async () => {
       .populate("customer", "name phone passbookNumber")
       .lean(),
     getPaymentMethodBreakdown({ paymentDate: { $gte: todayStart, $lte: todayEnd } }),
-    Payment.find({ status: PAYMENT_STATUS.SUCCESS })
+    Payment.find({})
       .sort({ paymentDate: -1 })
       .limit(5)
       .populate("customer", "name passbookNumber")
       .populate("collectedBy", "name role")
       .lean(),
     User.find({ role: USER_ROLES.STAFF, status: "ACTIVE" }).select("name phone").lean(),
-    Payment.aggregate([
+    aggregateEffectiveByStaff(
+      { paymentDate: { $gte: todayStart, $lte: todayEnd } },
       {
-        $match: {
-          status: PAYMENT_STATUS.SUCCESS,
-          paymentDate: { $gte: todayStart, $lte: todayEnd },
-          collectedByRole: USER_ROLES.STAFF,
-        },
-      },
-      {
-        $group: {
-          _id: "$collectedBy",
-          total: { $sum: "$amount" },
-          paymentsCount: { $sum: 1 },
-        },
-      },
-      { $sort: { total: -1 } },
-      { $limit: 5 },
-    ]),
+        paymentDate: { $gte: todayStart, $lte: todayEnd },
+        collectedByRole: USER_ROLES.STAFF,
+      }
+    ),
   ]);
 
   const today = buildTodayMethodTotals(todayBreakdown);
@@ -151,19 +154,23 @@ const getAdminDashboard = async () => {
   );
 
   const staffMap = new Map(staffUsers.map((staff) => [String(staff._id), staff]));
-  const topStaffByTodayCollection = topStaffRows
-    .map((row) => {
-      const staff = staffMap.get(String(row._id));
+  const topStaffByTodayCollection = Array.from(topStaffRows.entries())
+    .map(([staffId, row]) => {
+      const staff = staffMap.get(String(staffId));
       if (!staff) return null;
       return {
-        staffId: row._id,
+        staffId,
         name: staff.name,
         phone: staff.phone,
         total: row.total,
-        paymentsCount: row.paymentsCount,
+        paymentsCount: row.count,
       };
     })
-    .filter(Boolean);
+    .filter(Boolean)
+    .sort((left, right) => right.total - left.total)
+    .slice(0, 5);
+
+  const enrichedRecentPayments = await enrichPaymentsWithEffectiveView(recentPayments);
 
   const pendingRedemptionsPreview = pendingRedemptionSchemes.map((scheme) => ({
     schemeId: scheme._id,
@@ -186,7 +193,11 @@ const getAdminDashboard = async () => {
     },
     topStaffByTodayCollection,
     pendingRedemptionsPreview,
-    recentPayments: recentPayments.map(mapPaymentItem),
+    recentPayments: enrichedRecentPayments
+      .filter(({ view }) => view.effectiveLedger)
+      .map(({ payment, latest }) =>
+        mapPaymentItem(payment, applyEffectivePaymentRow(payment, latest))
+      ),
     totalStaffCashInHand,
   };
 };
@@ -226,29 +237,19 @@ const getStaffDashboard = async (user) => {
         collectedBy: user._id,
         paymentDate: { $gte: monthStart },
       }),
-      Payment.find({ collectedBy: user._id, status: PAYMENT_STATUS.SUCCESS })
+      Payment.find({ collectedBy: user._id })
         .sort({ paymentDate: -1 })
         .limit(5)
         .populate("customer", "name passbookNumber phone")
         .populate("scheme", "enrollmentNumber schemeName")
         .lean(),
-      Payment.aggregate([
+      aggregateEffectiveHourly(
         {
-          $match: {
-            collectedBy: user._id,
-            status: PAYMENT_STATUS.SUCCESS,
-            paymentDate: { $gte: todayStart, $lte: todayEnd },
-          },
+          collectedBy: user._id,
+          paymentDate: { $gte: todayStart, $lte: todayEnd },
         },
-        {
-          $group: {
-            _id: { $hour: "$paymentDate" },
-            total: { $sum: "$amount" },
-            count: { $sum: 1 },
-          },
-        },
-        { $sort: { _id: 1 } },
-      ]),
+        { paymentDate: { $gte: todayStart, $lte: todayEnd } }
+      ),
       CashSubmission.find({ staff: user._id })
         .sort({ submissionDate: -1, createdAt: -1 })
         .limit(5)
@@ -281,6 +282,8 @@ const getStaffDashboard = async (user) => {
     const row = hourlyRows.find((entry) => entry._id === hour);
     return { hour, amount: row?.total || 0, count: row?.count || 0 };
   });
+
+  const enrichedStaffRecent = await enrichPaymentsWithEffectiveView(recentPayments);
 
   return {
     staff: {
@@ -315,7 +318,11 @@ const getStaffDashboard = async (user) => {
       trendPercent,
       hourlyChart,
     },
-    recentPayments: recentPayments.map(mapPaymentItem),
+    recentPayments: enrichedStaffRecent
+      .filter(({ view }) => view.effectiveLedger)
+      .map(({ payment, latest }) =>
+        mapPaymentItem(payment, applyEffectivePaymentRow(payment, latest))
+      ),
     recentCashSubmissions: recentCashSubmissions.map((row) => ({
       _id: row._id,
       submittedAmount: row.submittedAmount || 0,
@@ -371,26 +378,28 @@ const getCustomerDashboard = async (user) => {
       .populate("updatedBy", "name role")
       .populate("statusHistory.changedBy", "name role")
       .sort({ createdAt: -1 }),
-    Payment.find({ customer: customer._id, status: PAYMENT_STATUS.SUCCESS })
+    Payment.find({ customer: customer._id })
       .sort({ paymentDate: -1 })
       .limit(100)
       .populate("collectedBy", "name role")
       .populate("scheme", "enrollmentNumber schemeName status")
       .lean(),
-    Payment.aggregate([
-      { $match: { customer: customer._id, status: PAYMENT_STATUS.SUCCESS } },
-      { $group: { _id: null, total: { $sum: "$amount" } } },
-    ]),
+    aggregateEffectiveTotal({ customer: customer._id }),
   ]);
 
   const enrichedSchemes = await Promise.all(schemeDocs.map((scheme) => enrichScheme(scheme)));
+  const enrichedPayments = await enrichPaymentsWithEffectiveView(paymentDocs);
   const activeScheme =
     enrichedSchemes.find((scheme) => scheme.status === SCHEME_STATUS.ACTIVE) || null;
   const schemeHistory = enrichedSchemes.filter(
     (scheme) => scheme.status !== SCHEME_STATUS.ACTIVE
   );
 
-  const paymentHistory = paymentDocs.map(mapPaymentItem);
+  const paymentHistory = enrichedPayments
+    .filter(({ view }) => view.effectiveLedger)
+    .map(({ payment, latest }) =>
+      mapPaymentItem(payment, applyEffectivePaymentRow(payment, latest))
+    );
   const limitSummary = activeScheme
     ? await getSchemeLimitSummary(activeScheme._id)
     : null;
@@ -434,7 +443,7 @@ const getCustomerDashboard = async (user) => {
             : null,
         }
       : null,
-    totalPaidAllTime: allTimePaid[0]?.total || 0,
+    totalPaidAllTime: allTimePaid,
   };
 };
 

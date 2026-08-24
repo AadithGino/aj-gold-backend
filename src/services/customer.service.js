@@ -15,12 +15,50 @@ const ApiError = require("../utils/ApiError");
 const { getNextSequence, generatePassbookNumber } = require("./receipt.service");
 const { logAudit } = require("./audit.service");
 const { getSchemeLimitSummary } = require("./paymentLimit.service");
+const { isInFirstPeriod } = require("../utils/schemeWindow");
 const {
-  assertPasswordStrength,
+  assertCustomerPassword,
+} = require("../constants/credentialPolicies");
+const {
   generateTemporaryPassword,
 } = require("./auth.service");
 
+const {
+  assertCustomerSearchAccess,
+  assertCustomerUpdateAccess,
+  getCustomerAccessMode,
+} = require("./accessControl.service");
+const {
+  enrichPaymentsWithEffectiveView,
+  applyEffectivePaymentRow,
+} = require("../utils/effectiveReadModel");
+
 const getId = (value) => (value && typeof value === "object" ? value._id || null : value || null);
+
+const sanitizeCollectionCustomer = (customer) => ({
+  _id: customer._id,
+  passbookNumber: customer.passbookNumber,
+  name: customer.name,
+  phone: customer.phone,
+  status: customer.status,
+});
+
+const sanitizeCollectionSearchItem = (item) => ({
+  ...sanitizeCollectionCustomer(item),
+  activeScheme: item.activeScheme
+    ? {
+        _id: item.activeScheme._id,
+        enrollmentNumber: item.activeScheme.enrollmentNumber,
+        status: item.activeScheme.status,
+        totalPaid: item.activeScheme.totalPaid,
+        remainingAllowedPayment: item.activeScheme.remainingAllowedPayment,
+        paymentCount: item.activeScheme.paymentCount,
+        inFirstSixMonths: item.activeScheme.inFirstSixMonths,
+        limitFullyUsed: item.activeScheme.limitFullyUsed,
+      }
+    : null,
+});
+
 const normalizeActor = (actor) => {
   if (!actor) return null;
   if (typeof actor === "object") {
@@ -55,12 +93,25 @@ const generateCustomerCode = async (date = new Date()) => {
   return `AJGK-CUST-${year}-${String(seq).padStart(4, "0")}`;
 };
 
-const getCustomerOrThrow = async (customerId) => {
-  const customer = await Customer.findById(customerId);
+const getCustomerOrThrow = async (customerId, session = null) => {
+  const customer = await Customer.findById(customerId).session(session || null);
   if (!customer) {
     throw new ApiError(404, "Customer not found.");
   }
   return customer;
+};
+
+const assertCustomerActiveForOperations = async (customer, session = null) => {
+  if (customer.status === USER_STATUS.INACTIVE) {
+    throw new ApiError(403, "Customer account is inactive.");
+  }
+
+  if (!customer.user) return;
+
+  const user = await User.findById(customer.user).session(session || null);
+  if (!user || user.status === USER_STATUS.INACTIVE) {
+    throw new ApiError(403, "Customer login account is inactive.");
+  }
 };
 
 const buildSchemeProgress = (scheme) => {
@@ -139,10 +190,15 @@ const enrichScheme = async (scheme) => {
           settledAt: scheme.settlement.settledAt,
           settledBy: scheme.settlement.settledBy,
           notes: scheme.settlement.notes || "",
-          overrideReason: scheme.settlement.overrideReason || "",
+          formulaVersion: scheme.settlement.formulaVersion || "",
           totalPaidAtSettlement: scheme.settlement.totalPaidAtSettlement,
+          payoutMethod: scheme.settlement.payoutMethod || "",
+          payoutReference: scheme.settlement.payoutReference || "",
+          settlementReceiptId: scheme.settlement.settlementReceiptId || "",
+          settlementCategory: scheme.settlement.settlementCategory || "",
         }
       : null,
+    settlementWorkflow: scheme.settlementWorkflow || null,
     progress,
     createdAt: scheme.createdAt,
     updatedAt: scheme.updatedAt,
@@ -179,7 +235,7 @@ const createCustomer = async (payload, actor) => {
   const initialPassword = payload.password?.trim() || passbookNumber;
   const temporaryPasswordReturned = payload.password?.trim() ? null : initialPassword;
   if (payload.password?.trim()) {
-    assertPasswordStrength(initialPassword);
+    assertCustomerPassword(initialPassword);
   }
   const passwordHash = await bcrypt.hash(initialPassword, 10);
   const customerCode = await generateCustomerCode();
@@ -255,6 +311,7 @@ const createCustomer = async (payload, actor) => {
 };
 
 const updateCustomer = async (customerId, payload, actor) => {
+  assertCustomerUpdateAccess(actor);
   const customer = await getCustomerOrThrow(customerId);
   const previousValue = sanitizeCustomer(customer);
 
@@ -262,60 +319,72 @@ const updateCustomer = async (customerId, payload, actor) => {
     throw new ApiError(403, "Only admin can update passbook number.");
   }
 
-  if (payload.passbookNumber && payload.passbookNumber.trim() !== customer.passbookNumber) {
-    const duplicate = await Customer.findOne({
-      passbookNumber: payload.passbookNumber.trim(),
-      _id: { $ne: customer._id },
-    });
-    if (duplicate) {
-      throw new ApiError(409, "Passbook number already exists.");
-    }
-    customer.passbookNumber = payload.passbookNumber.trim();
-  }
+  const session = await mongoose.startSession();
+  session.startTransaction();
 
-  if (payload.phone && payload.phone.trim() !== customer.phone) {
-    const duplicatePhone = await User.findOne({
-      phone: payload.phone.trim(),
-      _id: { $ne: customer.user },
-    });
-    if (duplicatePhone) {
-      throw new ApiError(409, "Phone number is already registered.");
+  try {
+    if (payload.passbookNumber && payload.passbookNumber.trim() !== customer.passbookNumber) {
+      const duplicate = await Customer.findOne({
+        passbookNumber: payload.passbookNumber.trim(),
+        _id: { $ne: customer._id },
+      }).session(session);
+      if (duplicate) {
+        throw new ApiError(409, "Passbook number already exists.");
+      }
+      customer.passbookNumber = payload.passbookNumber.trim();
     }
 
-    customer.phone = payload.phone.trim();
-    if (customer.user) {
-      await User.findByIdAndUpdate(customer.user, {
+    if (payload.phone && payload.phone.trim() !== customer.phone) {
+      const duplicatePhone = await User.findOne({
         phone: payload.phone.trim(),
-        updatedBy: actor._id,
-      });
+        _id: { $ne: customer.user },
+      }).session(session);
+      if (duplicatePhone) {
+        throw new ApiError(409, "Phone number is already registered.");
+      }
+      customer.phone = payload.phone.trim();
     }
-  }
 
-  if (payload.name) {
-    customer.name = payload.name.trim();
-    if (customer.user) {
-      await User.findByIdAndUpdate(customer.user, {
-        name: payload.name.trim(),
-        updatedBy: actor._id,
-      });
+    if (payload.name) {
+      customer.name = payload.name.trim();
     }
-  }
 
-  if (payload.address !== undefined) {
-    customer.address = payload.address?.trim() || "";
-  }
+    if (payload.address !== undefined) {
+      customer.address = payload.address?.trim() || "";
+    }
 
-  if (payload.nominee) {
-    customer.nominee = {
-      name: payload.nominee.name?.trim() || customer.nominee?.name || "",
-      phone: payload.nominee.phone?.trim() || customer.nominee?.phone || "",
-      relationship: payload.nominee.relationship?.trim() || customer.nominee?.relationship || "",
-      address: payload.nominee.address?.trim() || customer.nominee?.address || "",
-    };
-  }
+    if (payload.nominee) {
+      customer.nominee = {
+        name: payload.nominee.name?.trim() || customer.nominee?.name || "",
+        phone: payload.nominee.phone?.trim() || customer.nominee?.phone || "",
+        relationship:
+          payload.nominee.relationship?.trim() || customer.nominee?.relationship || "",
+        address: payload.nominee.address?.trim() || customer.nominee?.address || "",
+      };
+    }
 
-  customer.updatedBy = actor._id;
-  await customer.save();
+    customer.updatedBy = actor._id;
+    await customer.save({ session });
+
+    if (customer.user && (payload.name || payload.phone)) {
+      await User.findByIdAndUpdate(
+        customer.user,
+        {
+          ...(payload.name ? { name: payload.name.trim() } : {}),
+          ...(payload.phone ? { phone: payload.phone.trim() } : {}),
+          updatedBy: actor._id,
+        },
+        { session }
+      );
+    }
+
+    await session.commitTransaction();
+  } catch (error) {
+    await session.abortTransaction();
+    throw error;
+  } finally {
+    session.endSession();
+  }
 
   await logAudit({
     actor: actor._id,
@@ -338,20 +407,21 @@ const resetCustomerPassword = async (customerId, newPassword, actor) => {
     throw new ApiError(400, "Customer login user is not linked.");
   }
 
-  const passwordToSet = newPassword?.trim() || generateTemporaryPassword();
-  assertPasswordStrength(passwordToSet);
+  const passwordToSet = newPassword?.trim() || customer.passbookNumber || generateTemporaryPassword().slice(0, 4);
+  assertCustomerPassword(passwordToSet);
   const passwordHash = await bcrypt.hash(passwordToSet, 10);
   const temporaryPasswordReturned = newPassword?.trim() ? null : passwordToSet;
 
   await User.findByIdAndUpdate(customer.user, {
     passwordHash,
     updatedBy: actor._id,
+    $inc: { tokenVersion: 1 },
   });
 
   await logAudit({
     actor: actor._id,
     actorRole: actor.role,
-    action: AUDIT_ACTIONS.CUSTOMER_PASSWORD_RESET,
+    action: AUDIT_ACTIONS.PASSWORD_RESET,
     targetType: "Customer",
     targetId: customer._id,
     notes: "Customer password reset",
@@ -363,7 +433,8 @@ const resetCustomerPassword = async (customerId, newPassword, actor) => {
   };
 };
 
-const searchCustomers = async (search = "") => {
+const searchCustomers = async (search = "", actor = null) => {
+  const accessMode = await assertCustomerSearchAccess(actor, search);
   const trimmed = search.trim();
   let customers = [];
 
@@ -403,7 +474,7 @@ const searchCustomers = async (search = "") => {
           status: PAYMENT_STATUS.SUCCESS,
         });
         const now = new Date();
-        const inFirstSixMonths = now <= new Date(activeSchemeDoc.sixMonthDate);
+        const inFirstSixMonths = isInFirstPeriod(activeSchemeDoc, now);
         activeScheme = {
           ...activeScheme,
           paymentCount,
@@ -420,18 +491,21 @@ const searchCustomers = async (search = "") => {
         return counts;
       }, {});
 
-      return {
+      const item = {
         ...sanitizeCustomer(customer),
         activeScheme,
         schemeStatusCounts,
       };
+
+      return accessMode === "collection" ? sanitizeCollectionSearchItem(item) : item;
     })
   );
 
   return items;
 };
 
-const getCustomerDetail = async (customerId) => {
+const getCustomerDetail = async (customerId, actor = null) => {
+  const accessMode = await getCustomerAccessMode(actor);
   const customer = await Customer.findById(customerId)
     .populate("createdBy", "name role")
     .populate("updatedBy", "name role");
@@ -454,23 +528,34 @@ const getCustomerDetail = async (customerId) => {
     .limit(50)
     .select("-__v");
 
-  const paymentHistory = payments.map((payment) => ({
-    _id: payment._id,
-    amount: payment.amount,
-    paymentMethod: payment.paymentMethod,
-    paymentDate: payment.paymentDate,
-    receiptNumber: payment.receiptNumber,
-    status: payment.status,
-    scheme: payment.scheme,
-    collectedBy: payment.collectedBy
-      ? { name: payment.collectedBy.name, role: payment.collectedBy.role }
-      : null,
-    collectedByRole: payment.collectedByRole,
-    transactionReference: payment.transactionReference || null,
-    notes: payment.notes || null,
-    isLimitOverride: payment.isLimitOverride || false,
-    overrideReason: payment.overrideReason || null,
-  }));
+  const enrichedPayments = await enrichPaymentsWithEffectiveView(
+    payments.map((payment) => (payment.toObject ? payment.toObject() : payment))
+  );
+
+  const paymentHistory = enrichedPayments
+    .filter(({ view }) => view.effectiveLedger)
+    .map(({ payment, latest }) => {
+      const effectiveMeta = applyEffectivePaymentRow(payment, latest);
+      return {
+        _id: payment._id,
+        amount: effectiveMeta.displayAmount,
+        paymentMethod: effectiveMeta.displayPaymentMethod,
+        paymentDate: effectiveMeta.displayPaymentDate,
+        receiptNumber: payment.receiptNumber,
+        status: payment.status,
+        scheme: payment.scheme,
+        collectedBy: payment.collectedBy
+          ? { name: payment.collectedBy.name, role: payment.collectedBy.role }
+          : null,
+        collectedByRole: payment.collectedByRole,
+        transactionReference: payment.transactionReference || null,
+        notes: payment.notes || null,
+        isLimitOverride: payment.isLimitOverride || false,
+        overrideReason: payment.overrideReason || null,
+        sourceAmount: payment.amount,
+        effectiveAmount: effectiveMeta.effectiveAmount,
+      };
+    });
 
   const receiptHistory = paymentHistory.map((payment) => ({
     receiptNumber: payment.receiptNumber,
@@ -478,6 +563,22 @@ const getCustomerDetail = async (customerId) => {
     paymentDate: payment.paymentDate,
     scheme: payment.scheme,
   }));
+
+  if (accessMode === "collection") {
+    return {
+      customer: sanitizeCollectionCustomer(customer),
+      activeScheme: grouped.active
+        ? {
+            _id: grouped.active._id,
+            enrollmentNumber: grouped.active.enrollmentNumber,
+            status: grouped.active.status,
+            totalPaid: grouped.active.totalPaid,
+            remainingAllowedPayment: grouped.active.remainingAllowedPayment,
+            progress: grouped.active.progress,
+          }
+        : null,
+    };
+  }
 
   return {
     customer: sanitizeCustomer(customer),
@@ -501,14 +602,30 @@ const getCustomerDetail = async (customerId) => {
   };
 };
 
-const getCustomerSchemes = async (customerId) => {
+const getCustomerSchemes = async (customerId, actor = null) => {
+  const accessMode = await getCustomerAccessMode(actor);
   await getCustomerOrThrow(customerId);
   const schemes = await Scheme.find({ customer: customerId })
     .populate("createdBy", "name role")
     .populate("updatedBy", "name role")
     .populate("statusHistory.changedBy", "name role")
     .sort({ createdAt: -1 });
-  return Promise.all(schemes.map((scheme) => enrichScheme(scheme)));
+  const enriched = await Promise.all(schemes.map((scheme) => enrichScheme(scheme)));
+
+  if (accessMode === "collection") {
+    return enriched
+      .filter((scheme) => scheme.status === SCHEME_STATUS.ACTIVE)
+      .map((scheme) => ({
+        _id: scheme._id,
+        enrollmentNumber: scheme.enrollmentNumber,
+        status: scheme.status,
+        totalPaid: scheme.totalPaid,
+        remainingAllowedPayment: scheme.remainingAllowedPayment,
+        progress: scheme.progress,
+      }));
+  }
+
+  return enriched;
 };
 
 module.exports = {
@@ -520,6 +637,7 @@ module.exports = {
   getCustomerDetail,
   getCustomerSchemes,
   getCustomerOrThrow,
+  assertCustomerActiveForOperations,
   enrichScheme,
   buildSchemeProgress,
   groupSchemes,

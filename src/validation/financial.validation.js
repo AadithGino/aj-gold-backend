@@ -1,5 +1,6 @@
 const { z } = require("zod");
 const { PAYMENT_METHODS, SCHEME_STATUS } = require("../constants/enums");
+const { ALLOWED_SETTLEMENT_PAYOUT_METHODS } = require("../constants/settlementContract");
 
 const clientRequestIdSchema = z.string().trim().min(1, "clientRequestId is required.").max(128);
 
@@ -19,24 +20,29 @@ const positiveRupeeSchema = (label = "amount") =>
     }
   });
 
-const collectPaymentSchema = z.object({
-  customer: z.string().min(1, "Customer is required."),
-  scheme: z.string().min(1, "Scheme is required."),
-  amount: positiveRupeeSchema("amount"),
-  paymentMethod: z.enum(Object.values(PAYMENT_METHODS)),
-  paymentDate: z.coerce.date().optional(),
-  transactionReference: z.string().trim().optional(),
-  notes: z.string().trim().optional(),
-  overrideReason: z.string().trim().optional(),
-  clientRequestId: clientRequestIdSchema,
-});
+const collectPaymentSchema = z
+  .object({
+    customer: z.string().min(1, "Customer is required."),
+    scheme: z.string().min(1, "Scheme is required."),
+    amount: positiveRupeeSchema("amount"),
+    paymentMethod: z.enum(Object.values(PAYMENT_METHODS)),
+    transactionReference: z.string().trim().optional(),
+    notes: z.string().trim().optional(),
+    clientRequestId: clientRequestIdSchema,
+  })
+  .superRefine((value, ctx) => {
+    if (value.paymentMethod !== PAYMENT_METHODS.CASH && !value.transactionReference?.trim()) {
+      ctx.addIssue({
+        code: "custom",
+        message: "transactionReference is required for non-cash payment methods.",
+      });
+    }
+  });
 
 const reversePaymentSchema = z.object({
   reason: z.string().trim().min(3, "Reason is required."),
   notes: z.string().trim().optional(),
   clientRequestId: clientRequestIdSchema,
-  settlementAdjustmentOverride: z.boolean().optional(),
-  settlementAdjustmentReason: z.string().trim().optional(),
 });
 
 const cashSubmissionSchema = z.object({
@@ -49,12 +55,20 @@ const cashSubmissionSchema = z.object({
 
 const staffSelfCashSubmissionSchema = cashSubmissionSchema.omit({ staff: true });
 
-const schemeSettlementSchema = z.object({
-  status: z.enum([SCHEME_STATUS.REDEEMED, SCHEME_STATUS.CLOSED]),
-  settlementAmount: positiveRupeeSchema("settlementAmount"),
-  notes: z.string().trim().min(1, "Notes are required for settlement."),
+const schemeSettlementSchema = z
+  .object({
+    status: z.enum([SCHEME_STATUS.REDEEMED, SCHEME_STATUS.CLOSED]),
+    notes: z.string().trim().min(1, "Notes are required for settlement."),
+    clientRequestId: clientRequestIdSchema,
+    payoutMethod: z.enum(ALLOWED_SETTLEMENT_PAYOUT_METHODS),
+    payoutReference: z.string().trim().optional(),
+  })
+  .strict();
+
+const cashSubmissionReversalSchema = z.object({
+  reason: z.string().trim().min(3, "Reason is required."),
+  notes: z.string().trim().optional(),
   clientRequestId: clientRequestIdSchema,
-  overrideReason: z.string().trim().optional(),
 });
 
 const correctionReviewSchema = z.object({
@@ -62,8 +76,6 @@ const correctionReviewSchema = z.object({
   approvedValue: z.any().optional(),
   reason: z.string().trim().optional(),
   reviewClientRequestId: clientRequestIdSchema,
-  settlementAdjustmentOverride: z.boolean().optional(),
-  settlementAdjustmentReason: z.string().trim().optional(),
 });
 
 module.exports = {
@@ -74,5 +86,6 @@ module.exports = {
   cashSubmissionSchema,
   staffSelfCashSubmissionSchema,
   schemeSettlementSchema,
+  cashSubmissionReversalSchema,
   correctionReviewSchema,
 };

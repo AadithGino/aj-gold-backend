@@ -1,33 +1,10 @@
 const mongoose = require("mongoose");
 const ApiError = require("../utils/ApiError");
 const { ERROR_CODES, resolveErrorMeta } = require("../constants/errorCodes");
+const { mapMongooseError } = require("../utils/mongoErrors");
 
 const notFound = (req, res, next) => {
   next(new ApiError(404, `Not found: ${req.originalUrl}`));
-};
-
-const mapMongooseError = (err) => {
-  if (err instanceof ApiError) return err;
-
-  if (err?.name === "ValidationError") {
-    const message = Object.values(err.errors || {})
-      .map((item) => item.message)
-      .join("; ");
-    return new ApiError(400, message || "Validation failed.");
-  }
-
-  if (err?.name === "CastError") {
-    return new ApiError(400, "Invalid identifier or value.");
-  }
-
-  if (err?.code === 11000) {
-    return new ApiError(409, "Duplicate record detected.", [], {
-      code: ERROR_CODES.IDEMPOTENCY_KEY_REUSED,
-      retryable: false,
-    });
-  }
-
-  return null;
 };
 
 const errorHandler = (err, req, res, next) => {

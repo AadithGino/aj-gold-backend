@@ -100,7 +100,7 @@ const run = async () => {
   assert(staffProfile.employeeCode.startsWith("AJGK-STF-"), "Employee code auto-generated");
 
   const staffList = await listStaff({ search: staffPhone });
-  assert(staffList.some((item) => item.staffUserId.toString() === staffUser._id.toString()), "Staff appears in list");
+  assert(staffList.items.some((item) => item.staffUserId.toString() === staffUser._id.toString()), "Staff appears in list");
 
   const passbookNumber = `${runTag}-PB`;
   const customer = await Customer.create({

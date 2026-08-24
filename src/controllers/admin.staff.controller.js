@@ -16,8 +16,11 @@ const asyncHandler = require("../utils/asyncHandler");
 const permissionsSchema = z.object({
   canCreateCustomer: z.boolean().optional(),
   canCollectPayment: z.boolean().optional(),
+  canViewReports: z.boolean().optional(),
+  canSubmitCash: z.boolean().optional(),
   canMarkRedeemed: z.boolean().optional(),
   canMarkClosed: z.boolean().optional(),
+  canFinalizeSettlement: z.boolean().optional(),
 });
 
 const createStaffSchema = z.object({
@@ -29,7 +32,7 @@ const createStaffSchema = z.object({
     .max(15, "Phone must be at most 15 digits.")
     .regex(/^\d+$/, "Phone must contain only digits."),
   email: z.string().trim().email("Invalid email.").optional().or(z.literal("")),
-  password: z.string().min(6, "Password must be at least 6 characters."),
+  password: z.string().min(8, "Password must be at least 8 characters.").optional(),
   employeeCode: z.string().trim().optional(),
   permissions: permissionsSchema.optional(),
   notes: z.string().trim().optional(),
@@ -80,11 +83,15 @@ const createStaffHandler = asyncHandler(async (req, res) => {
 });
 
 const listStaffHandler = asyncHandler(async (req, res) => {
-  const items = await listStaff({ search: req.query.search || "" });
+  const result = await listStaff({
+    search: req.query.search || "",
+    cursor: req.query.cursor,
+    limit: req.query.limit,
+  });
 
   return res.status(200).json({
     success: true,
-    data: { items },
+    data: { items: result.items, pageInfo: result.pageInfo },
   });
 });
 

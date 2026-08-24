@@ -3,15 +3,22 @@ const {
   updateSchemeStatus,
   getSchemeDetail,
 } = require("../services/schemeManagement.service");
+const {
+  previewEntitlement,
+  getSettlementDetail,
+} = require("../services/settlement.service");
 const ApiError = require("../utils/ApiError");
 const asyncHandler = require("../utils/asyncHandler");
 const { z } = require("zod");
 const { schemeSettlementSchema } = require("../validation/financial.validation");
 
+const { clientRequestIdSchema } = require("../validation/financial.validation");
+
 const createSchemeSchema = z.object({
   customerId: z.string().min(1, "Customer is required."),
   schemeName: z.string().trim().optional(),
   startDate: z.coerce.date().optional(),
+  clientRequestId: clientRequestIdSchema,
 });
 
 const parseBody = (schema, body) => {
@@ -51,8 +58,26 @@ const updateSchemeStatusHandler = asyncHandler(async (req, res) => {
   });
 });
 
+const previewSettlementHandler = asyncHandler(async (req, res) => {
+  const preview = await previewEntitlement(req.params.schemeId);
+  return res.status(200).json({
+    success: true,
+    data: preview,
+  });
+});
+
+const getSettlementDetailHandler = asyncHandler(async (req, res) => {
+  const detail = await getSettlementDetail(req.params.schemeId);
+  return res.status(200).json({
+    success: true,
+    data: detail,
+  });
+});
+
 module.exports = {
   createSchemeHandler,
   getSchemeHandler,
   updateSchemeStatusHandler,
+  previewSettlementHandler,
+  getSettlementDetailHandler,
 };

@@ -1,16 +1,16 @@
 const Scheme = require("../models/scheme.model");
 const { SCHEME_STATUS } = require("../constants/enums");
-const { addMonths } = require("../utils/date");
+const { toBusinessInstant, addCalendarMonthsInBusinessTz } = require("../utils/date");
 const { generateEnrollmentNumber } = require("./receipt.service");
 const ApiError = require("../utils/ApiError");
 
 const calculateSchemeDates = (startDate) => {
-  const start = startDate instanceof Date ? startDate : new Date(startDate);
+  const start = toBusinessInstant(startDate || new Date());
 
   return {
     startDate: start,
-    sixMonthDate: addMonths(start, 6),
-    maturityDate: addMonths(start, 11),
+    sixMonthDate: addCalendarMonthsInBusinessTz(start, 6),
+    maturityDate: addCalendarMonthsInBusinessTz(start, 11),
   };
 };
 

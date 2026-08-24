@@ -15,16 +15,32 @@ const ApiError = require("../utils/ApiError");
 const { ERROR_CODES } = require("../constants/errorCodes");
 const { parsePositiveRupeeInteger } = require("../utils/money");
 const { withTransaction } = require("../utils/transaction");
-const { isSchemeSettled } = require("../utils/scheme");
+const { isSchemeFinanciallyLocked } = require("../utils/scheme");
 const { parseDateRange } = require("../utils/date");
 const { logAudit } = require("./audit.service");
 const { getPaymentByIdOrThrow } = require("./payment.service");
 const { getSchemeLimitSummary } = require("./paymentLimit.service");
-const { notifyPaymentReversed } = require("./notification.service");
+const {
+  recordEffectiveStateCorrection,
+} = require("../utils/journalRecording");
+const { enqueueOutboxEvent } = require("./outbox.service");
+const { OUTBOX_TOPICS } = require("../models/outboxEvent.model");
+const { NOTIFICATION_TYPES } = require("../models/notification.model");
 const {
   checkIdempotencyReplay,
   saveIdempotencyResult,
 } = require("./idempotency.service");
+const {
+  buildSourceSnapshot,
+  getEffectiveLedgerFields,
+  loadSchemeLedgerContext,
+} = require("../utils/paymentLedger");
+const {
+  buildEffectiveSnapshot,
+  getEffectiveSnapshotForPayment,
+  assertNonCashCollectionReference,
+} = require("../utils/effectivePayment");
+const { assertProposedLedgerEntry, assertLedgerEntriesValid } = require("../utils/ledgerValidation");
 const {
   lockStaffCashProfile,
   assertNoNegativeCashAfterPaymentChange,
@@ -49,7 +65,10 @@ const mapCorrection = (doc) => ({
   requestedByRole: doc.requestedByRole,
   correctionType: doc.correctionType,
   originalSnapshot: doc.originalSnapshot,
+  beforeSnapshot: doc.beforeSnapshot,
   appliedSnapshot: doc.appliedSnapshot,
+  afterSnapshot: doc.afterSnapshot || doc.appliedSnapshot,
+  version: doc.version,
   requestedValue: doc.requestedValue,
   reason: doc.reason,
   status: doc.status,
@@ -66,6 +85,10 @@ const assertCanRequestCorrection = async (payment, actor, session = null) => {
     throw new ApiError(403, "Customers cannot request payment corrections.");
   }
 
+  if (actor.role === USER_ROLES.ADMIN) {
+    throw new ApiError(403, "Only the collecting staff member may request a payment correction.");
+  }
+
   if (actor.role === USER_ROLES.STAFF) {
     const collectorId = String(payment.collectedBy?._id || payment.collectedBy);
     if (collectorId !== String(actor._id)) {
@@ -74,7 +97,7 @@ const assertCanRequestCorrection = async (payment, actor, session = null) => {
   }
 
   const scheme = await Scheme.findById(payment.scheme._id || payment.scheme).session(session || null);
-  if (scheme && isSchemeSettled(scheme)) {
+  if (scheme && isSchemeFinanciallyLocked(scheme)) {
     throw new ApiError(409, "Scheme is already settled.", [], {
       code: ERROR_CODES.SCHEME_ALREADY_SETTLED,
       retryable: false,
@@ -141,6 +164,13 @@ const createCorrectionRequest = async (paymentId, payload, actor) => {
 
   const requestedValue = validateRequestedValue(payload.correctionType, payload.requestedValue);
 
+  const beforeSnapshot = await getEffectiveSnapshotForPayment(payment._id);
+  const version =
+    (await PaymentCorrection.countDocuments({
+      payment: payment._id,
+      status: CORRECTION_STATUS.APPROVED,
+    })) + 1;
+
   const correction = await PaymentCorrection.create({
     payment: payment._id,
     customer: payment.customer._id || payment.customer,
@@ -149,6 +179,8 @@ const createCorrectionRequest = async (paymentId, payload, actor) => {
     requestedByRole: actor.role,
     correctionType: payload.correctionType,
     originalSnapshot: buildPaymentSnapshot(payment),
+    beforeSnapshot,
+    version,
     requestedValue,
     reason,
     status: CORRECTION_STATUS.PENDING,
@@ -176,28 +208,28 @@ const createCorrectionRequest = async (paymentId, payload, actor) => {
   );
 };
 
-const resolveApprovedValues = (payment, correction, approvedValue) => {
+const resolveApprovedValues = (currentEffective, correction, approvedValue) => {
   const value = approvedValue != null ? approvedValue : correction.requestedValue;
   const { correctionType } = correction;
 
   if (correctionType === CORRECTION_TYPES.REVERSE_PAYMENT) {
     return {
-      amount: payment.amount,
-      paymentMethod: payment.paymentMethod,
-      paymentDate: payment.paymentDate,
-      transactionReference: payment.transactionReference || "",
+      amount: currentEffective.amount,
+      paymentMethod: currentEffective.paymentMethod,
+      paymentDate: currentEffective.paymentDate,
+      transactionReference: currentEffective.transactionReference || "",
       notes: correction.reason,
       status: PAYMENT_STATUS.REVERSED,
     };
   }
 
   const next = {
-    amount: payment.amount,
-    paymentMethod: payment.paymentMethod,
-    paymentDate: payment.paymentDate,
-    transactionReference: payment.transactionReference || "",
-    notes: payment.notes || "",
-    status: payment.status,
+    amount: currentEffective.amount,
+    paymentMethod: currentEffective.paymentMethod,
+    paymentDate: currentEffective.paymentDate,
+    transactionReference: currentEffective.transactionReference || "",
+    notes: currentEffective.notes || "",
+    status: currentEffective.status,
   };
 
   switch (correctionType) {
@@ -229,13 +261,17 @@ const resolveApprovedValues = (payment, correction, approvedValue) => {
   return next;
 };
 
-const applyCashCorrectionGuards = async (payment, nextValues, session) => {
+const assertApprovedValuesValid = (nextValues) => {
+  assertNonCashCollectionReference(nextValues.paymentMethod, nextValues.transactionReference);
+};
+
+const applyCashCorrectionGuards = async (payment, previousEffective, nextValues, session) => {
   const staffCollector =
     payment.collectedByRole === USER_ROLES.STAFF ? payment.collectedBy : null;
   if (!staffCollector) return;
 
   const affectsCash =
-    payment.paymentMethod === PAYMENT_METHODS.CASH ||
+    previousEffective.paymentMethod === PAYMENT_METHODS.CASH ||
     nextValues.paymentMethod === PAYMENT_METHODS.CASH;
 
   if (!affectsCash) return;
@@ -243,50 +279,52 @@ const applyCashCorrectionGuards = async (payment, nextValues, session) => {
   await lockStaffCashProfile(staffCollector, session);
   await assertNoNegativeCashAfterPaymentChange({
     staffId: staffCollector,
-    previousAmount: payment.amount,
-    previousMethod: payment.paymentMethod,
+    previousAmount: previousEffective.amount,
+    previousMethod: previousEffective.paymentMethod,
     nextAmount: nextValues.amount,
     nextMethod: nextValues.paymentMethod,
     session,
   });
 };
 
-const applyApprovedCorrection = async (payment, correction, approvedValue, session) => {
-  const nextValues = resolveApprovedValues(payment, correction, approvedValue);
-
+const applyApprovedCorrection = async (payment, correction, beforeSnapshot, nextValues, session) => {
   if (
     nextValues.status === PAYMENT_STATUS.REVERSED ||
     correction.correctionType === CORRECTION_TYPES.REVERSE_PAYMENT
   ) {
-    await applyCashCorrectionGuards(payment, nextValues, session);
+    await applyCashCorrectionGuards(payment, beforeSnapshot, nextValues, session);
     payment.status = PAYMENT_STATUS.REVERSED;
     payment.notes = nextValues.notes;
     await payment.save({ session });
-    return buildPaymentSnapshot(payment);
+    return {
+      ...beforeSnapshot,
+      status: PAYMENT_STATUS.REVERSED,
+      notes: nextValues.notes,
+      receiptNumber: payment.receiptNumber,
+      sourceSnapshot: buildSourceSnapshot(payment),
+    };
   }
 
-  await applyCashCorrectionGuards(payment, nextValues, session);
+  await applyCashCorrectionGuards(payment, beforeSnapshot, nextValues, session);
 
-  payment.amount = nextValues.amount;
-  payment.paymentMethod = nextValues.paymentMethod;
-  payment.paymentDate = nextValues.paymentDate;
-  payment.transactionReference = nextValues.transactionReference;
-  payment.notes = nextValues.notes;
-  await payment.save({ session });
-
-  return buildPaymentSnapshot(payment);
+  return {
+    amount: nextValues.amount,
+    paymentMethod: nextValues.paymentMethod,
+    paymentDate: nextValues.paymentDate,
+    transactionReference: nextValues.transactionReference,
+    notes: nextValues.notes,
+    status: payment.status,
+    receiptNumber: payment.receiptNumber,
+    sourceSnapshot: buildSourceSnapshot(payment),
+  };
 };
 
-const assertSettlementAllowsCorrection = (scheme, payload) => {
-  if (!isSchemeSettled(scheme)) return;
-
-  const allowOverride = Boolean(payload.settlementAdjustmentOverride);
-  const overrideReason = payload.settlementAdjustmentReason?.trim() || "";
-  if (!allowOverride || !overrideReason) {
-    throw new ApiError(
-      409,
-      "Scheme is settled. Provide settlementAdjustmentOverride and settlementAdjustmentReason."
-    );
+const assertSettlementAllowsCorrection = (scheme) => {
+  if (isSchemeFinanciallyLocked(scheme)) {
+    throw new ApiError(409, "Scheme is already settled.", [], {
+      code: ERROR_CODES.SCHEME_ALREADY_SETTLED,
+      retryable: false,
+    });
   }
 };
 
@@ -299,8 +337,6 @@ const approveCorrection = async (correctionId, payload, actor) => {
     correctionId,
     approvedValue: payload.approvedValue ?? null,
     reviewNotes: payload.reviewNotes?.trim() || "",
-    settlementAdjustmentOverride: Boolean(payload.settlementAdjustmentOverride),
-    settlementAdjustmentReason: payload.settlementAdjustmentReason?.trim() || "",
   };
 
   const txnResult = await withTransaction(async (session) => {
@@ -337,6 +373,10 @@ const approveCorrection = async (correctionId, payload, actor) => {
       });
     }
 
+    if (String(correction.requestedBy) === String(actor._id)) {
+      throw new ApiError(403, "Requester cannot approve their own correction request.");
+    }
+
     const payment = await Payment.findById(correction.payment).session(session);
     if (!payment) throw new ApiError(404, "Linked payment not found.");
     if (payment.status !== PAYMENT_STATUS.SUCCESS && correction.correctionType !== CORRECTION_TYPES.REVERSE_PAYMENT) {
@@ -345,17 +385,66 @@ const approveCorrection = async (correctionId, payload, actor) => {
 
     const scheme = await Scheme.findById(correction.scheme).session(session);
     if (!scheme) throw new ApiError(404, "Scheme not found.");
-    assertSettlementAllowsCorrection(scheme, payload);
+    assertSettlementAllowsCorrection(scheme);
+
+    await Scheme.findByIdAndUpdate(
+      scheme._id,
+      { $inc: { financialVersion: 1 } },
+      { session }
+    );
 
     const approvedValue =
       payload.approvedValue != null
         ? validateRequestedValue(correction.correctionType, payload.approvedValue)
         : correction.requestedValue;
 
+    const { entries, latestByPayment } = await loadSchemeLedgerContext(scheme._id, session);
+    const latestCorrection = latestByPayment.get(String(payment._id)) || null;
+    const currentLedger = getEffectiveLedgerFields(payment, latestCorrection);
+    const beforeSnapshot =
+      correction.beforeSnapshot || buildEffectiveSnapshot(currentLedger) || buildPaymentSnapshot(payment);
+    const nextValues = resolveApprovedValues(beforeSnapshot, correction, approvedValue);
+    assertApprovedValuesValid(nextValues);
+
+    if (
+      correction.correctionType === CORRECTION_TYPES.REVERSE_PAYMENT ||
+      nextValues.status === PAYMENT_STATUS.REVERSED
+    ) {
+      const proposedEntries = entries.filter(
+        (entry) => String(entry.paymentId) !== String(payment._id)
+      );
+      assertLedgerEntriesValid(scheme, proposedEntries);
+    } else {
+      assertProposedLedgerEntry(scheme, entries, payment._id, {
+        paymentId: payment._id,
+        amount: nextValues.amount,
+        paymentMethod: nextValues.paymentMethod,
+        paymentDate: nextValues.paymentDate,
+        transactionReference: nextValues.transactionReference,
+        notes: nextValues.notes,
+        status: payment.status,
+        sourceSnapshot: currentLedger?.sourceSnapshot || buildSourceSnapshot(payment),
+        adjustmentCorrectionId: correction._id,
+      });
+    }
+
     const appliedSnapshot = await applyApprovedCorrection(
       payment,
       correction,
-      approvedValue,
+      beforeSnapshot,
+      nextValues,
+      session
+    );
+
+    await recordEffectiveStateCorrection(
+      {
+        correction,
+        payment,
+        before: beforeSnapshot,
+        after: appliedSnapshot,
+        actor,
+        clientRequestId: payload.reviewClientRequestId,
+      },
       session
     );
 
@@ -364,6 +453,7 @@ const approveCorrection = async (correctionId, payload, actor) => {
       {
         $set: {
           appliedSnapshot,
+          afterSnapshot: appliedSnapshot,
           requestedValue: payload.approvedValue != null ? approvedValue : correction.requestedValue,
         },
       },
@@ -381,10 +471,9 @@ const approveCorrection = async (correctionId, payload, actor) => {
         paymentId: payment._id,
         correctionType: correction.correctionType,
         approvedValue,
+        beforeSnapshot,
         appliedSnapshot,
         reviewClientRequestId: payload.reviewClientRequestId,
-        settlementAdjustmentOverride: Boolean(payload.settlementAdjustmentOverride),
-        settlementAdjustmentReason: payload.settlementAdjustmentReason?.trim() || "",
       },
       notes: payload.reviewNotes?.trim() || payload.reason || "Correction approved",
       session,
@@ -408,27 +497,37 @@ const approveCorrection = async (correctionId, payload, actor) => {
       session,
     });
 
+    if (response.notifyReverse) {
+      const customer = await Customer.findById(payment.customer).session(session);
+      if (customer?.user) {
+        await enqueueOutboxEvent(
+          {
+            topic: OUTBOX_TOPICS.PAYMENT_REVERSED,
+            dedupeKey: `correction-reverse:${correction._id}`,
+            payload: {
+              recipient: customer.user,
+              type: NOTIFICATION_TYPES.PAYMENT_REVERSED,
+              title: "Payment Reversed",
+              message: `Your payment of ₹${payment.amount.toLocaleString("en-IN")} (${payment.receiptNumber}) has been reversed after an approved correction.`,
+              data: {
+                paymentId: payment._id,
+                correctionId: correction._id,
+                amount: payment.amount,
+                receiptNumber: payment.receiptNumber,
+              },
+            },
+          },
+          session
+        );
+      }
+    }
+
     return { replay: false, response };
   });
 
   const correctionRef = txnResult.replay
     ? txnResult.response.correctionId
     : txnResult.response.correctionId;
-
-  if (!txnResult.replay && txnResult.response.notifyReverse) {
-    const payment = await Payment.findById(txnResult.response.paymentId);
-    const customer = await Customer.findById(payment.customer).lean();
-    if (customer && payment) {
-      notifyPaymentReversed({
-        customer,
-        payment: {
-          _id: payment._id,
-          amount: payment.amount,
-          receiptNumber: payment.receiptNumber,
-        },
-      });
-    }
-  }
 
   const schemeSummary = await getSchemeLimitSummary(
     txnResult.replay ? txnResult.response.schemeId : txnResult.response.schemeId

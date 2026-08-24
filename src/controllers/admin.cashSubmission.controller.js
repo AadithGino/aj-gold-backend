@@ -1,7 +1,7 @@
-const { createCashSubmission, listCashSubmissions } = require("../services/cash.service");
+const { createCashSubmission, listCashSubmissions, reverseCashSubmission } = require("../services/cash.service");
 const ApiError = require("../utils/ApiError");
 const asyncHandler = require("../utils/asyncHandler");
-const { cashSubmissionSchema } = require("../validation/financial.validation");
+const { cashSubmissionSchema, cashSubmissionReversalSchema } = require("../validation/financial.validation");
 
 const parseBody = (schema, body) => {
   const parsed = schema.safeParse(body);
@@ -39,7 +39,25 @@ const listCashSubmissionsHandler = asyncHandler(async (req, res) => {
   });
 });
 
+const reverseCashSubmissionHandler = asyncHandler(async (req, res) => {
+  const payload = parseBody(cashSubmissionReversalSchema, req.body);
+  const { submission, cashSummary } = await reverseCashSubmission(
+    req.params.submissionId,
+    payload,
+    req.user
+  );
+
+  return res.status(200).json({
+    success: true,
+    data: {
+      submission: submission.toObject(),
+      cashSummary,
+    },
+  });
+});
+
 module.exports = {
   createCashSubmissionHandler,
   listCashSubmissionsHandler,
+  reverseCashSubmissionHandler,
 };

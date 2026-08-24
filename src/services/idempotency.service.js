@@ -54,6 +54,24 @@ const saveIdempotencyResult = async ({
   resourceId,
   session,
 }) => {
+  const updated = await IdempotencyRecord.findOneAndUpdate(
+    { clientRequestId, operationType, requestHash },
+    {
+      $set: {
+        status: "COMPLETED",
+        responsePayload,
+        actor: actor?._id,
+        resourceType,
+        resourceId,
+      },
+    },
+    { new: true, session, upsert: true, setDefaultsOnInsert: true }
+  );
+
+  if (updated) {
+    return responsePayload;
+  }
+
   try {
     await IdempotencyRecord.create(
       [

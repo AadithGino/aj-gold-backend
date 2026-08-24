@@ -14,7 +14,17 @@ const {
 const {
   createCashSubmissionHandler,
   listCashSubmissionsHandler,
+  reverseCashSubmissionHandler,
 } = require("../controllers/admin.cashSubmission.controller");
+const {
+  getIntegritySummaryHandler,
+  listJournalEntriesHandler,
+  listAuditLogsHandler,
+  listIdempotencyRecordsHandler,
+  listOutboxEventsHandler,
+  getReconciliationExceptionsHandler,
+  getAdminSettlementDetailHandler,
+} = require("../controllers/admin.oversight.controller");
 
 const router = express.Router();
 
@@ -30,6 +40,15 @@ router.patch("/staff/:staffId/status", updateStaffStatusHandler);
 router.patch("/staff/:staffId", updateStaffHandler);
 
 router.post("/cash-submissions", createCashSubmissionHandler);
+router.post("/cash-submissions/:submissionId/reverse", reverseCashSubmissionHandler);
 router.get("/cash-submissions", listCashSubmissionsHandler);
+
+router.get("/integrity-summary", getIntegritySummaryHandler);
+router.get("/reconciliation/exceptions", getReconciliationExceptionsHandler);
+router.get("/journal", listJournalEntriesHandler);
+router.get("/audit-logs", listAuditLogsHandler);
+router.get("/idempotency-records", listIdempotencyRecordsHandler);
+router.get("/outbox-events", listOutboxEventsHandler);
+router.get("/schemes/:schemeId/settlement", getAdminSettlementDetailHandler);
 
 module.exports = router;

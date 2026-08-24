@@ -16,21 +16,44 @@ const { ERROR_CODES } = require("../constants/errorCodes");
 const { parseDateRange } = require("../utils/date");
 const { parsePositiveRupeeInteger } = require("../utils/money");
 const { withTransaction } = require("../utils/transaction");
-const { isSchemeSettled } = require("../utils/scheme");
+const { isSchemeSettled, isSchemeFinanciallyLocked } = require("../utils/scheme");
 const { logAudit } = require("./audit.service");
 const { generateReceiptNumber } = require("./receipt.service");
 const { willNewPaymentExceedLimit, getSchemeLimitSummary } = require("./paymentLimit.service");
+const {
+  assertCollectPaymentAllowed,
+  assertCallerPaymentDateNotAllowed,
+} = require("../utils/schemeWindow");
 const { getReceiptDisplayData } = require("./cash.service");
-const { notifyPaymentReceived, notifyPaymentReversed } = require("./notification.service");
 const { hasStaffPermission } = require("../constants/staffPermissions");
+const { assertNonCashReference } = require("../utils/paymentReference");
+const { enqueueOutboxEvent } = require("./outbox.service");
+const { OUTBOX_TOPICS } = require("../models/outboxEvent.model");
+const { NOTIFICATION_TYPES } = require("../models/notification.model");
 const {
   checkIdempotencyReplay,
   saveIdempotencyResult,
 } = require("./idempotency.service");
+const { buildPaymentCollectIntent } = require("../utils/idempotencyPayload");
+const {
+  loadSchemeLedgerContext,
+  buildSourceSnapshot,
+  getEffectiveLedgerFields,
+} = require("../utils/paymentLedger");
+const { assertLedgerEntriesValid } = require("../utils/ledgerValidation");
+const {
+  recordCollectionReceived,
+  recordCollectionReversal,
+} = require("../utils/journalRecording");
 const {
   lockStaffCashProfile,
   assertStaffCashInHandSufficient,
 } = require("./staffCash.service");
+const { parseCursorPagination, buildCursorPage } = require("../utils/pagination");
+const {
+  enrichPaymentsWithEffectiveView,
+  applyEffectivePaymentRow,
+} = require("../utils/effectiveReadModel");
 
 const MAX_LIST_LIMIT = 200;
 
@@ -44,7 +67,7 @@ const assertCollectorAllowed = async (actor) => {
   }
 
   const staffProfile = await StaffProfile.findOne({ user: actor._id });
-  if (!hasStaffPermission(staffProfile, "canCollectPayment")) {
+  if (!staffProfile || !hasStaffPermission(staffProfile, "canCollectPayment")) {
     throw new ApiError(403, "Staff does not have payment collection permission.");
   }
 };
@@ -62,52 +85,64 @@ const assertPaymentAccess = (payment, actor) => {
   throw new ApiError(403, "Forbidden.");
 };
 
-const getCustomerOrThrow = async (customerId, session = null) => {
-  const customer = await Customer.findById(customerId).session(session || null);
-  if (!customer) {
-    throw new ApiError(404, "Customer not found.");
-  }
-  return customer;
-};
+const { getCustomerOrThrow, assertCustomerActiveForOperations } = require("./customer.service");
 
-const mapPayment = (payment) => ({
-  _id: payment._id,
-  customer: payment.customer && payment.customer._id
-    ? {
-        _id: payment.customer._id,
-        name: payment.customer.name,
-        phone: payment.customer.phone,
-        passbookNumber: payment.customer.passbookNumber,
-      }
-    : payment.customer,
-  scheme: payment.scheme && payment.scheme._id
-    ? {
-        _id: payment.scheme._id,
-        enrollmentNumber: payment.scheme.enrollmentNumber,
-        status: payment.scheme.status,
-      }
-    : payment.scheme,
-  collectedBy: payment.collectedBy && payment.collectedBy._id
-    ? {
-        _id: payment.collectedBy._id,
-        name: payment.collectedBy.name,
-        role: payment.collectedBy.role,
-      }
-    : payment.collectedBy,
-  collectedByRole: payment.collectedByRole,
-  amount: payment.amount,
-  paymentMethod: payment.paymentMethod,
-  transactionReference: payment.transactionReference || "",
-  paymentDate: payment.paymentDate,
-  receiptNumber: payment.receiptNumber,
-  status: payment.status,
-  isLimitOverride: Boolean(payment.isLimitOverride),
-  overrideReason: payment.overrideReason || "",
-  overrideBy: payment.overrideBy,
-  notes: payment.notes || "",
-  createdAt: payment.createdAt,
-  updatedAt: payment.updatedAt,
-});
+const mapPayment = (payment, effectiveMeta = null) => {
+  const base = {
+    _id: payment._id,
+    customer: payment.customer && payment.customer._id
+      ? {
+          _id: payment.customer._id,
+          name: payment.customer.name,
+          phone: payment.customer.phone,
+          passbookNumber: payment.customer.passbookNumber,
+        }
+      : payment.customer,
+    scheme: payment.scheme && payment.scheme._id
+      ? {
+          _id: payment.scheme._id,
+          enrollmentNumber: payment.scheme.enrollmentNumber,
+          status: payment.scheme.status,
+        }
+      : payment.scheme,
+    collectedBy: payment.collectedBy && payment.collectedBy._id
+      ? {
+          _id: payment.collectedBy._id,
+          name: payment.collectedBy.name,
+          role: payment.collectedBy.role,
+        }
+      : payment.collectedBy,
+    collectedByRole: payment.collectedByRole,
+    amount: payment.amount,
+    paymentMethod: payment.paymentMethod,
+    transactionReference: payment.transactionReference || "",
+    paymentDate: payment.paymentDate,
+    receiptNumber: payment.receiptNumber,
+    status: payment.status,
+    isLimitOverride: Boolean(payment.isLimitOverride),
+    overrideReason: payment.overrideReason || "",
+    overrideBy: payment.overrideBy,
+    notes: payment.notes || "",
+    createdAt: payment.createdAt,
+    updatedAt: payment.updatedAt,
+  };
+
+  if (!effectiveMeta) {
+    return base;
+  }
+
+  return {
+    ...base,
+    amount: effectiveMeta.displayAmount,
+    paymentMethod: effectiveMeta.displayPaymentMethod,
+    paymentDate: effectiveMeta.displayPaymentDate,
+    sourceAmount: payment.amount,
+    sourcePaymentMethod: payment.paymentMethod,
+    effectiveAmount: effectiveMeta.effectiveAmount,
+    effectivePaymentMethod: effectiveMeta.effectivePaymentMethod,
+    isEffectivelyReversed: effectiveMeta.isEffectivelyReversed,
+  };
+};
 
 const getPaymentByIdOrThrow = async (paymentId, session = null) => {
   if (!mongoose.Types.ObjectId.isValid(paymentId)) {
@@ -127,27 +162,19 @@ const getPaymentByIdOrThrow = async (paymentId, session = null) => {
   return payment;
 };
 
-const buildCollectIdempotencyPayload = (payload, amount, paymentDate) => ({
-  customer: payload.customer,
-  scheme: payload.scheme,
-  amount,
-  paymentMethod: payload.paymentMethod,
-  paymentDate: paymentDate.toISOString(),
-  transactionReference: payload.transactionReference?.trim() || "",
-  notes: payload.notes?.trim() || "",
-  overrideReason: payload.overrideReason?.trim() || "",
-});
+const buildCollectIdempotencyPayload = (payload, amount) =>
+  buildPaymentCollectIntent(payload, amount);
 
 const collectPayment = async (payload, actor) => {
   await assertCollectorAllowed(actor);
 
-  const amount = parsePositiveRupeeInteger(payload.amount, "amount");
-  const paymentDate = payload.paymentDate ? new Date(payload.paymentDate) : new Date();
-  if (Number.isNaN(paymentDate.getTime())) {
-    throw new ApiError(400, "Invalid payment date.");
-  }
+  assertCallerPaymentDateNotAllowed(payload);
 
-  const idempotencyPayload = buildCollectIdempotencyPayload(payload, amount, paymentDate);
+  const amount = parsePositiveRupeeInteger(payload.amount, "amount");
+  assertNonCashReference(payload.paymentMethod, payload.transactionReference);
+  const paymentDate = new Date();
+
+  const idempotencyPayload = buildCollectIdempotencyPayload(payload, amount);
 
   const txnResult = await withTransaction(async (session) => {
     const replay = await checkIdempotencyReplay({
@@ -167,7 +194,7 @@ const collectPayment = async (payload, actor) => {
     );
     if (!scheme) {
       const existing = await Scheme.findById(payload.scheme).session(session);
-      if (existing && isSchemeSettled(existing)) {
+      if (existing && isSchemeFinanciallyLocked(existing)) {
         throw new ApiError(409, "Scheme is already settled.", [], {
           code: ERROR_CODES.PAYMENT_AFTER_SETTLEMENT,
           retryable: false,
@@ -176,7 +203,7 @@ const collectPayment = async (payload, actor) => {
       throw new ApiError(409, "Payment can only be collected for ACTIVE schemes.");
     }
 
-    if (isSchemeSettled(scheme)) {
+    if (isSchemeFinanciallyLocked(scheme)) {
       throw new ApiError(409, "Scheme is already settled.", [], {
         code: ERROR_CODES.PAYMENT_AFTER_SETTLEMENT,
         retryable: false,
@@ -184,22 +211,20 @@ const collectPayment = async (payload, actor) => {
     }
 
     const customer = await getCustomerOrThrow(payload.customer, session);
+    await assertCustomerActiveForOperations(customer, session);
     if (scheme.customer.toString() !== customer._id.toString()) {
       throw new ApiError(400, "Scheme does not belong to the selected customer.");
     }
 
+    assertCollectPaymentAllowed(scheme, paymentDate);
+
     const limitCheck = await willNewPaymentExceedLimit(scheme._id, amount, paymentDate, session);
-    const overrideReason = payload.overrideReason?.trim() || "";
-    let isLimitOverride = false;
 
     if (limitCheck.exceedsLimit) {
-      if (actor.role === USER_ROLES.STAFF) {
-        throw new ApiError(403, "Payment exceeds allowed limit. Staff cannot override.");
-      }
-      if (!overrideReason) {
-        throw new ApiError(400, "Override reason is required when payment exceeds allowed limit.");
-      }
-      isLimitOverride = true;
+      throw new ApiError(409, "Payment exceeds remaining allowed amount for the post-six-month period.", [], {
+        code: ERROR_CODES.PAYMENT_LIMIT_EXCEEDED,
+        retryable: false,
+      });
     }
 
     if (
@@ -224,31 +249,20 @@ const collectPayment = async (payload, actor) => {
           paymentDate,
           receiptNumber,
           status: PAYMENT_STATUS.SUCCESS,
-          isLimitOverride,
-          overrideReason: isLimitOverride ? overrideReason : "",
-          overrideBy: isLimitOverride ? actor._id : undefined,
           notes: payload.notes?.trim() || "",
         },
       ],
       { session }
     );
 
-    if (isLimitOverride) {
-      await logAudit({
-        actor: actor._id,
-        actorRole: actor.role,
-        action: AUDIT_ACTIONS.ADMIN_OVERRIDE_USED,
-        targetType: "Payment",
-        targetId: payment._id,
-        newValue: {
-          paymentId: payment._id,
-          amount: payment.amount,
-          overrideReason,
-        },
-        notes: `Admin override used for over-limit payment on scheme ${scheme.enrollmentNumber}`,
-        session,
-      });
-    }
+    await recordCollectionReceived(
+      {
+        payment,
+        actor,
+        clientRequestId: payload.clientRequestId,
+      },
+      session
+    );
 
     await logAudit({
       actor: actor._id,
@@ -262,7 +276,6 @@ const collectPayment = async (payload, actor) => {
         amount: payment.amount,
         paymentMethod: payment.paymentMethod,
         receiptNumber: payment.receiptNumber,
-        isLimitOverride,
         clientRequestId: payload.clientRequestId,
       },
       notes: "Payment collected",
@@ -286,6 +299,29 @@ const collectPayment = async (payload, actor) => {
       resourceId: payment._id,
       session,
     });
+
+    if (customer.user) {
+      const roleTag = actor.role === USER_ROLES.ADMIN ? "Admin" : "Staff";
+      await enqueueOutboxEvent(
+        {
+          topic: OUTBOX_TOPICS.PAYMENT_RECEIVED,
+          dedupeKey: `payment-received:${payment._id}`,
+          payload: {
+            recipient: customer.user,
+            type: NOTIFICATION_TYPES.PAYMENT_RECEIVED,
+            title: "Payment Received",
+            message: `${roleTag} ${actor.name || actor.role} collected ₹${payment.amount.toLocaleString("en-IN")} via ${payment.paymentMethod} for your scheme (${payment.receiptNumber}).`,
+            data: {
+              paymentId: payment._id,
+              amount: payment.amount,
+              paymentMethod: payment.paymentMethod,
+              receiptNumber: payment.receiptNumber,
+            },
+          },
+        },
+        session
+      );
+    }
 
     return { replay: false, response, customer, paymentId: payment._id };
   });
@@ -311,18 +347,6 @@ const collectPayment = async (payload, actor) => {
     getReceiptDisplayData(paymentId),
   ]);
 
-  notifyPaymentReceived({
-    customer,
-    payment: {
-      _id: savedPayment._id,
-      amount: savedPayment.amount,
-      paymentMethod: savedPayment.paymentMethod,
-      receiptNumber: savedPayment.receiptNumber,
-    },
-    collectedByName: actor.name || actor.role,
-    collectedByRole: actor.role,
-  });
-
   return {
     payment: mapPayment(savedPayment),
     schemeSummary,
@@ -332,7 +356,7 @@ const collectPayment = async (payload, actor) => {
 };
 
 const listPayments = async (
-  { customerId, schemeId, staffId, from, to, method, limit } = {},
+  { customerId, schemeId, staffId, from, to, method, limit, cursor } = {},
   actor = null
 ) => {
   const customRange = parseDateRange(from, to);
@@ -340,7 +364,12 @@ const listPayments = async (
     throw new ApiError(400, customRange.error);
   }
 
-  const query = { status: PAYMENT_STATUS.SUCCESS };
+  const { limit: resolvedLimit, cursor: decodedCursor } = parseCursorPagination(
+    { cursor, limit },
+    { maxLimit: MAX_LIST_LIMIT, defaultLimit: 50 }
+  );
+
+  const query = {};
 
   if (actor?.role === USER_ROLES.STAFF) {
     query.collectedBy = actor._id;
@@ -353,12 +382,6 @@ const listPayments = async (
   if (schemeId) {
     query.scheme = schemeId;
   }
-  if (method) {
-    if (!Object.values(PAYMENT_METHODS).includes(method)) {
-      throw new ApiError(400, "Invalid payment method filter.");
-    }
-    query.paymentMethod = method;
-  }
   if (customRange.from || customRange.to) {
     query.paymentDate = {};
     if (customRange.from) {
@@ -369,22 +392,61 @@ const listPayments = async (
     }
   }
 
-  const resolvedLimit = Math.min(limit || MAX_LIST_LIMIT, MAX_LIST_LIMIT);
+  if (decodedCursor?.paymentDate && decodedCursor?.createdAt && decodedCursor?._id) {
+    query.$or = [
+      { paymentDate: { $lt: new Date(decodedCursor.paymentDate) } },
+      {
+        paymentDate: new Date(decodedCursor.paymentDate),
+        createdAt: { $lt: new Date(decodedCursor.createdAt) },
+      },
+      {
+        paymentDate: new Date(decodedCursor.paymentDate),
+        createdAt: new Date(decodedCursor.createdAt),
+        _id: { $lt: decodedCursor._id },
+      },
+    ];
+  }
 
-  const items = await Payment.find(query)
+  const rows = await Payment.find(query)
     .populate("customer", "name phone passbookNumber")
     .populate("scheme", "enrollmentNumber status")
     .populate("collectedBy", "name role")
-    .sort({ paymentDate: -1, createdAt: -1 })
-    .limit(resolvedLimit);
+    .sort({ paymentDate: -1, createdAt: -1, _id: -1 })
+    .limit(resolvedLimit + 1)
+    .lean();
 
-  return items.map(mapPayment);
+  const enriched = await enrichPaymentsWithEffectiveView(rows);
+  const items = enriched
+    .filter(({ view }) => {
+      if (!view.effectiveLedger) {
+        return false;
+      }
+      if (method && !Object.values(PAYMENT_METHODS).includes(method)) {
+        throw new ApiError(400, "Invalid payment method filter.");
+      }
+      if (method && view.paymentMethod !== method) {
+        return false;
+      }
+      return true;
+    })
+    .map(({ payment, latest }) => mapPayment(payment, applyEffectivePaymentRow(payment, latest)));
+
+  return buildCursorPage(items, {
+    limit: resolvedLimit,
+    getCursorValue: (row) => ({
+      paymentDate: row.paymentDate,
+      createdAt: row.createdAt,
+      _id: row._id,
+    }),
+  });
 };
 
 const getPaymentDetail = async (paymentId, actor = null) => {
   const payment = await getPaymentByIdOrThrow(paymentId);
   assertPaymentAccess(payment, actor);
-  return mapPayment(payment);
+  const enriched = await enrichPaymentsWithEffectiveView([payment.toObject ? payment.toObject() : payment]);
+  const { payment: row, latest } = enriched[0];
+  return mapPayment(row, applyEffectivePaymentRow(row, latest));
 };
 
 const getPaymentReceipt = async (paymentId, actor = null) => {
@@ -396,7 +458,7 @@ const getPaymentReceipt = async (paymentId, actor = null) => {
   }
 
   return {
-    payment: mapPayment(payment),
+    payment: await getPaymentDetail(paymentId, actor),
     receipt: {
       businessName: "AJ Gold Kambil",
       ...receipt,
@@ -418,8 +480,6 @@ const reversePayment = async (paymentId, payload, actor) => {
     paymentId,
     reason,
     notes: payload.notes?.trim() || "",
-    settlementAdjustmentOverride: Boolean(payload.settlementAdjustmentOverride),
-    settlementAdjustmentReason: payload.settlementAdjustmentReason?.trim() || "",
   };
 
   const txnResult = await withTransaction(async (session) => {
@@ -453,15 +513,38 @@ const reversePayment = async (paymentId, payload, actor) => {
       throw new ApiError(404, "Scheme not found.");
     }
 
-    if (isSchemeSettled(scheme)) {
-      const allowOverride = Boolean(payload.settlementAdjustmentOverride);
-      const overrideReason = payload.settlementAdjustmentReason?.trim() || "";
-      if (!allowOverride || !overrideReason) {
+    if (isSchemeFinanciallyLocked(scheme)) {
+      throw new ApiError(409, "Scheme is already settled.", [], {
+        code: ERROR_CODES.SCHEME_ALREADY_SETTLED,
+        retryable: false,
+      });
+    }
+
+    await Scheme.findByIdAndUpdate(
+      scheme._id,
+      { $inc: { financialVersion: 1 } },
+      { session }
+    );
+
+    const { entries } = await loadSchemeLedgerContext(scheme._id, session);
+    const proposedEntries = entries.filter(
+      (entry) => String(entry.paymentId) !== String(payment._id)
+    );
+    try {
+      assertLedgerEntriesValid(scheme, proposedEntries);
+    } catch (error) {
+      if (error.code === ERROR_CODES.PAYMENT_LIMIT_EXCEEDED) {
         throw new ApiError(
           409,
-          "Scheme is settled. Provide settlementAdjustmentOverride and settlementAdjustmentReason to reverse."
+          "Reversing this payment would break the later-period payment cap.",
+          [],
+          {
+            code: ERROR_CODES.REVERSAL_BREAKS_PAYMENT_CAP,
+            retryable: false,
+          }
         );
       }
+      throw error;
     }
 
     if (
@@ -477,6 +560,15 @@ const reversePayment = async (paymentId, payload, actor) => {
     payment.notes = payload.notes?.trim() || reason;
     await payment.save({ session });
 
+    await recordCollectionReversal(
+      {
+        payment,
+        actor,
+        clientRequestId: payload.clientRequestId,
+      },
+      session
+    );
+
     await logAudit({
       actor: actor._id,
       actorRole: actor.role,
@@ -488,8 +580,6 @@ const reversePayment = async (paymentId, payload, actor) => {
         status: PAYMENT_STATUS.REVERSED,
         reason,
         notes: payment.notes,
-        settlementAdjustmentOverride: Boolean(payload.settlementAdjustmentOverride),
-        settlementAdjustmentReason: payload.settlementAdjustmentReason?.trim() || "",
         clientRequestId: payload.clientRequestId,
       },
       notes: `Payment reversed: ${reason}`,
@@ -513,6 +603,28 @@ const reversePayment = async (paymentId, payload, actor) => {
       session,
     });
 
+    const customer = await Customer.findById(payment.customer).session(session);
+    if (customer?.user) {
+      await enqueueOutboxEvent(
+        {
+          topic: OUTBOX_TOPICS.PAYMENT_REVERSED,
+          dedupeKey: `payment-reversed:${payment._id}`,
+          payload: {
+            recipient: customer.user,
+            type: NOTIFICATION_TYPES.PAYMENT_REVERSED,
+            title: "Payment Reversed",
+            message: `Your payment of ₹${payment.amount.toLocaleString("en-IN")} (${payment.receiptNumber}) has been reversed. Please contact your AJ Gold advisor for details.`,
+            data: {
+              paymentId: payment._id,
+              amount: payment.amount,
+              receiptNumber: payment.receiptNumber,
+            },
+          },
+        },
+        session
+      );
+    }
+
     return { replay: false, response };
   });
 
@@ -523,22 +635,6 @@ const reversePayment = async (paymentId, payload, actor) => {
       txnResult.replay ? txnResult.response.schemeId : txnResult.response.schemeId
     ),
   ]);
-
-  if (!txnResult.replay && updatedPayment.customer) {
-    const customer = await Customer.findById(
-      updatedPayment.customer._id || updatedPayment.customer
-    ).lean();
-    if (customer) {
-      notifyPaymentReversed({
-        customer,
-        payment: {
-          _id: updatedPayment._id,
-          amount: updatedPayment.amount,
-          receiptNumber: updatedPayment.receiptNumber,
-        },
-      });
-    }
-  }
 
   return {
     payment: mapPayment(updatedPayment),

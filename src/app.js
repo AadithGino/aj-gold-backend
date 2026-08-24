@@ -1,9 +1,11 @@
 const express = require("express");
 const cors = require("cors");
 const helmet = require("helmet");
-const morgan = require("morgan");
-const { CORS_ORIGINS, BODY_SIZE_LIMIT, NODE_ENV } = require("./config/env");
+const ApiError = require("./utils/ApiError");
+const { CORS_ORIGINS, BODY_SIZE_LIMIT, NODE_ENV, TRUST_PROXY } = require("./config/env");
 const requestIdMiddleware = require("./middleware/requestId.middleware");
+const requestLogMiddleware = require("./middleware/requestLog.middleware");
+const sensitiveResponseMiddleware = require("./middleware/sensitiveResponse.middleware");
 
 const healthRoutes       = require("./routes/health.routes");
 const authRoutes         = require("./routes/auth.routes");
@@ -19,22 +21,36 @@ const { notFound, errorHandler } = require("./middleware/error.middleware");
 
 const app = express();
 
+if (TRUST_PROXY !== false) {
+  app.set("trust proxy", TRUST_PROXY);
+}
+
 app.use(requestIdMiddleware);
+app.use(requestLogMiddleware);
 app.use(helmet());
 app.use(
   cors({
     origin(origin, callback) {
-      if (!origin || CORS_ORIGINS.length === 0 || CORS_ORIGINS.includes(origin)) {
+      if (!origin) {
         return callback(null, true);
       }
-      return callback(new Error("CORS origin not allowed."));
+
+      const normalized = origin.trim().replace(/\/+$/, "");
+
+      if (CORS_ORIGINS.length === 0) {
+        if (NODE_ENV === "production") {
+          return callback(new ApiError(403, "CORS is not configured for production."));
+        }
+        return callback(null, true);
+      }
+
+      if (CORS_ORIGINS.includes(normalized)) {
+        return callback(null, true);
+      }
+
+      return callback(new ApiError(403, "CORS origin not allowed."));
     },
     credentials: true,
-  })
-);
-app.use(
-  morgan(NODE_ENV === "production" ? "combined" : "dev", {
-    skip: (req) => req.path === "/api/health",
   })
 );
 app.use(express.json({ limit: BODY_SIZE_LIMIT }));
@@ -45,15 +61,15 @@ app.get("/", (req, res) => {
 });
 
 app.use("/api/health",        healthRoutes);
-app.use("/api/auth",          authRoutes);
-app.use("/api/admin",         adminRoutes);
-app.use("/api/customers",     customerRoutes);
-app.use("/api/schemes",       schemeRoutes);
-app.use("/api/payments",      paymentRoutes);
-app.use("/api/dashboard",     dashboardRoutes);
-app.use("/api/reports",       reportRoutes);
-app.use("/api/notifications", notificationRoutes);
-app.use("/api/corrections",   correctionRoutes);
+app.use("/api/auth",          sensitiveResponseMiddleware, authRoutes);
+app.use("/api/admin",         sensitiveResponseMiddleware, adminRoutes);
+app.use("/api/customers",     sensitiveResponseMiddleware, customerRoutes);
+app.use("/api/schemes",       sensitiveResponseMiddleware, schemeRoutes);
+app.use("/api/payments",      sensitiveResponseMiddleware, paymentRoutes);
+app.use("/api/dashboard",     sensitiveResponseMiddleware, dashboardRoutes);
+app.use("/api/reports",       sensitiveResponseMiddleware, reportRoutes);
+app.use("/api/notifications", sensitiveResponseMiddleware, notificationRoutes);
+app.use("/api/corrections",   sensitiveResponseMiddleware, correctionRoutes);
 
 app.use(notFound);
 app.use(errorHandler);

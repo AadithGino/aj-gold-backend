@@ -1,0 +1,13 @@
+{
+  "filename": "aj-gold-backend-final-production-candidate.zip",
+  "bytes": 292499,
+  "sha256": "f13873c8cb80be68bdfe78f7b02fd4331942869c792c02441bb9e87925c6fd38",
+  "gitCommit": "e2d2243633b3e6deab8f8877ac6807b3234dfc22",
+  "createdAt": "2026-08-24T16:50:01.107Z",
+  "migrationRange": {
+    "first": "001_one_active_scheme_per_customer",
+    "last": "006_unique_employee_code_and_notification_dedupe",
+    "count": 6
+  },
+  "testEvidence": "npm test"
+}

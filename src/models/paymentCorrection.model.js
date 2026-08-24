@@ -46,6 +46,9 @@ const paymentCorrectionSchema = new mongoose.Schema(
     reviewedAt: Date,
     reviewNotes: { type: String, trim: true, default: "" },
     reviewClientRequestId: { type: String, trim: true },
+    version: { type: Number, min: 1 },
+    beforeSnapshot: { type: mongoose.Schema.Types.Mixed, required: true },
+    afterSnapshot: { type: mongoose.Schema.Types.Mixed },
     notes: { type: String, trim: true, default: "" },
   },
   { timestamps: true }

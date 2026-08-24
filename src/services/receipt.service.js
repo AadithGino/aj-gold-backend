@@ -1,5 +1,6 @@
 const ReceiptCounter = require("../models/receiptCounter.model");
 const ApiError = require("../utils/ApiError");
+const { businessYear, businessDayKey } = require("../utils/date");
 
 const padSequence = (seq, length = 6) => String(seq).padStart(length, "0");
 
@@ -14,14 +15,14 @@ const getNextSequence = async (key, session = null) => {
 };
 
 const generateReceiptNumber = async (date = new Date(), session = null) => {
-  const year = date.getFullYear();
+  const year = businessYear(date);
   const key = `receipt-${year}`;
   const seq = await getNextSequence(key, session);
   return `AJGK-${year}-${padSequence(seq)}`;
 };
 
 const generateEnrollmentNumber = async (date = new Date(), session = null) => {
-  const year = date.getFullYear();
+  const year = businessYear(date);
   const key = `enrollment-${year}`;
   const seq = await getNextSequence(key, session);
   return `AJGK-ENR-${year}-${padSequence(seq)}`;
@@ -29,6 +30,13 @@ const generateEnrollmentNumber = async (date = new Date(), session = null) => {
 
 const PASSBOOK_COUNTER_KEY = "PASSBOOK";
 const PASSBOOK_MAX = 9999;
+
+const generateSettlementReceiptNumber = async (date = new Date(), session = null) => {
+  const year = businessYear(date);
+  const key = `settlement-${year}`;
+  const seq = await getNextSequence(key, session);
+  return `AJGK-SET-${year}-${padSequence(seq)}`;
+};
 
 const generatePassbookNumber = async (session = null) => {
   const seq = await getNextSequence(PASSBOOK_COUNTER_KEY, session);
@@ -43,8 +51,10 @@ const generatePassbookNumber = async (session = null) => {
 module.exports = {
   generateReceiptNumber,
   generateEnrollmentNumber,
+  generateSettlementReceiptNumber,
   generatePassbookNumber,
   getNextSequence,
   PASSBOOK_COUNTER_KEY,
   PASSBOOK_MAX,
+  businessDayKey,
 };

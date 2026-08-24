@@ -4,6 +4,7 @@ const {
   before,
   after,
   beforeEach,
+  mock,
 } = require("node:test");
 const assert = require("node:assert/strict");
 const crypto = require("crypto");
@@ -56,10 +57,83 @@ const {
   hashRequestPayload,
 } = require("../src/services/idempotency.service");
 const { transactionConflictError } = require("../src/utils/transaction");
+const { calculateSchemeDates } = require("../src/services/scheme.service");
+const {
+  deriveSchemeWindow,
+  buildPeriodPaymentMatch,
+  PAYMENT_PERIODS,
+} = require("../src/utils/schemeWindow");
+const { assertCollectorAllowed } = require("../src/services/payment.service");
+const { FULL_OPERATIONAL_STAFF_PERMISSIONS } = require("./helpers/staffTestPermissions");
 
 const reqId = () => crypto.randomUUID();
-const EARLY_PAYMENT_DATE = new Date("2025-02-01");
-const POST_SIX_MONTH_DATE = new Date("2025-08-01");
+const SCHEME_START = "2025-01-01";
+
+const settleScheme = (
+  schemeId,
+  actor,
+  {
+    status = SCHEME_STATUS.REDEEMED,
+    notes = "Settled",
+    payoutMethod = PAYMENT_METHODS.UPI,
+    payoutReference = `PAY-${crypto.randomUUID().slice(0, 8)}`,
+    clientRequestId = reqId(),
+  } = {}
+) =>
+  updateSchemeStatus(
+    schemeId,
+    {
+      status,
+      notes,
+      clientRequestId,
+      payoutMethod,
+      ...(payoutMethod === PAYMENT_METHODS.CASH ? {} : { payoutReference }),
+    },
+    actor
+  );
+
+const schemeWindowForStart = (startDate = SCHEME_START) =>
+  deriveSchemeWindow(calculateSchemeDates(startDate));
+
+const firstPeriodTime = (startDate = SCHEME_START) => {
+  const window = schemeWindowForStart(startDate);
+  return new Date(window.startDate.getTime() + 24 * 60 * 60 * 1000);
+};
+
+const laterPeriodTime = (startDate = SCHEME_START) => {
+  const window = schemeWindowForStart(startDate);
+  return new Date(window.laterPeriodStart.getTime() + 24 * 60 * 60 * 1000);
+};
+
+const firstPeriodTimeForScheme = (scheme) => {
+  const window = deriveSchemeWindow(scheme);
+  return new Date(window.startDate.getTime() + 24 * 60 * 60 * 1000);
+};
+
+const laterPeriodTimeForScheme = (scheme) => {
+  const window = deriveSchemeWindow(scheme);
+  return new Date(window.laterPeriodStart.getTime() + 24 * 60 * 60 * 1000);
+};
+
+let mockTimerDepth = 0;
+
+const withMockedNow = async (when, fn) => {
+  if (mockTimerDepth === 0) {
+    mock.timers.enable({ apis: ["Date"], now: when.getTime() });
+  } else {
+    mock.timers.setTime(when.getTime());
+  }
+
+  mockTimerDepth += 1;
+  try {
+    return await fn();
+  } finally {
+    mockTimerDepth -= 1;
+    if (mockTimerDepth === 0) {
+      mock.timers.reset();
+    }
+  }
+};
 
 let replSet;
 
@@ -79,11 +153,14 @@ const createStaff = async (status = USER_STATUS.ACTIVE) => {
     role: USER_ROLES.STAFF,
     status,
   });
-  await StaffProfile.create({ user: staff._id });
+  await StaffProfile.create({
+    user: staff._id,
+    permissions: FULL_OPERATIONAL_STAFF_PERMISSIONS,
+  });
   return staff;
 };
 
-const seedCustomerScheme = async (admin, startDate = new Date("2025-01-01")) => {
+const seedCustomerScheme = async (admin, startDate = SCHEME_START) => {
   const customer = await createCustomer(
     {
       name: "Test Customer",
@@ -93,25 +170,40 @@ const seedCustomerScheme = async (admin, startDate = new Date("2025-01-01")) => 
     admin
   );
   const scheme = await createScheme(
-    { customerId: customer._id.toString(), startDate },
+    { customerId: customer._id.toString(), startDate, clientRequestId: reqId() },
     admin
   );
   return { customer, scheme };
 };
 
-const pay = (customer, scheme, actor, amount, method = PAYMENT_METHODS.CASH, extras = {}) =>
-  collectPayment(
-    {
-      customer: customer._id.toString(),
-      scheme: scheme._id.toString(),
-      amount,
-      paymentMethod: method,
-      paymentDate: extras.paymentDate || EARLY_PAYMENT_DATE,
-      clientRequestId: extras.clientRequestId || reqId(),
-      ...extras,
-    },
-    actor
+const pay = async (
+  customer,
+  scheme,
+  actor,
+  amount,
+  method = PAYMENT_METHODS.CASH,
+  extras = {}
+) => {
+  const { at, paymentDate: _ignoredPaymentDate, ...rest } = extras;
+  const schemeDoc = scheme.startDate ? scheme : await Scheme.findById(scheme._id);
+  const when = at || firstPeriodTimeForScheme(schemeDoc);
+  return withMockedNow(when, () =>
+    collectPayment(
+      {
+        customer: customer._id.toString(),
+        scheme: scheme._id.toString(),
+        amount,
+        paymentMethod: method,
+        ...(method === PAYMENT_METHODS.CASH
+          ? {}
+          : { transactionReference: rest.transactionReference || `TXN-${reqId().slice(0, 8)}` }),
+        clientRequestId: rest.clientRequestId || reqId(),
+        ...rest,
+      },
+      actor
+    )
   );
+};
 
 const expectStatus = async (promise, statusCode) => {
   await assert.rejects(promise, (error) => error.statusCode === statusCode);
@@ -196,16 +288,16 @@ describe("financial hardening", () => {
     const staff = await createStaff();
     const { customer, scheme } = await seedCustomerScheme(admin);
     const clientRequestId = reqId();
+    const when = firstPeriodTime();
     const payload = {
       customer: customer._id.toString(),
       scheme: scheme._id.toString(),
       amount: 5000,
       paymentMethod: PAYMENT_METHODS.CASH,
-      paymentDate: EARLY_PAYMENT_DATE,
       clientRequestId,
     };
-    const first = await collectPayment(payload, staff);
-    const second = await collectPayment(payload, staff);
+    const first = await withMockedNow(when, () => collectPayment(payload, staff));
+    const second = await withMockedNow(when, () => collectPayment(payload, staff));
     assert.equal(String(first.payment._id), String(second.payment._id));
     assert.equal(await Payment.countDocuments(), 1);
   });
@@ -215,28 +307,31 @@ describe("financial hardening", () => {
     const staff = await createStaff();
     const { customer, scheme } = await seedCustomerScheme(admin);
     const clientRequestId = reqId();
-    await collectPayment(
-      {
-        customer: customer._id.toString(),
-        scheme: scheme._id.toString(),
-        amount: 5000,
-        paymentMethod: PAYMENT_METHODS.CASH,
-        paymentDate: EARLY_PAYMENT_DATE,
-        clientRequestId,
-      },
-      staff
-    );
-    await expectStatus(
+    const when = firstPeriodTime();
+    await withMockedNow(when, () =>
       collectPayment(
         {
           customer: customer._id.toString(),
           scheme: scheme._id.toString(),
-          amount: 6000,
+          amount: 5000,
           paymentMethod: PAYMENT_METHODS.CASH,
-          paymentDate: EARLY_PAYMENT_DATE,
           clientRequestId,
         },
         staff
+      )
+    );
+    await expectStatus(
+      withMockedNow(when, () =>
+        collectPayment(
+          {
+            customer: customer._id.toString(),
+            scheme: scheme._id.toString(),
+            amount: 6000,
+            paymentMethod: PAYMENT_METHODS.CASH,
+            clientRequestId,
+          },
+          staff
+        )
       ),
       409
     );
@@ -246,35 +341,35 @@ describe("financial hardening", () => {
     const admin = await createAdmin();
     const staff = await createStaff();
     const { customer, scheme } = await seedCustomerScheme(admin);
+    const whenFirst = firstPeriodTime();
+    const whenLater = laterPeriodTime();
 
-    await pay(customer, scheme, admin, 30000, PAYMENT_METHODS.CASH, {
-      paymentDate: EARLY_PAYMENT_DATE,
-    });
+    await pay(customer, scheme, admin, 30000, PAYMENT_METHODS.CASH, { at: whenFirst });
 
-    const results = await Promise.allSettled([
-      collectPayment(
-        {
-          customer: customer._id.toString(),
-          scheme: scheme._id.toString(),
-          amount: 20000,
-          paymentMethod: PAYMENT_METHODS.CASH,
-          paymentDate: POST_SIX_MONTH_DATE,
-          clientRequestId: reqId(),
-        },
-        staff
-      ),
-      collectPayment(
-        {
-          customer: customer._id.toString(),
-          scheme: scheme._id.toString(),
-          amount: 20000,
-          paymentMethod: PAYMENT_METHODS.CASH,
-          paymentDate: POST_SIX_MONTH_DATE,
-          clientRequestId: reqId(),
-        },
-        staff
-      ),
-    ]);
+    const results = await withMockedNow(whenLater, async () =>
+      Promise.allSettled([
+        collectPayment(
+          {
+            customer: customer._id.toString(),
+            scheme: scheme._id.toString(),
+            amount: 20000,
+            paymentMethod: PAYMENT_METHODS.CASH,
+            clientRequestId: reqId(),
+          },
+          staff
+        ),
+        collectPayment(
+          {
+            customer: customer._id.toString(),
+            scheme: scheme._id.toString(),
+            amount: 20000,
+            paymentMethod: PAYMENT_METHODS.CASH,
+            clientRequestId: reqId(),
+          },
+          staff
+        ),
+      ])
+    );
 
     const fulfilled = results.filter((result) => result.status === "fulfilled");
     const rejected = results.filter((result) => result.status === "rejected");
@@ -282,12 +377,13 @@ describe("financial hardening", () => {
     assert.equal(rejected.length, 1);
 
     const schemeDoc = await Scheme.findById(scheme._id);
+    const laterMatch = buildPeriodPaymentMatch(schemeDoc, PAYMENT_PERIODS.LATER);
     const postSixMonthTotal = await Payment.aggregate([
       {
         $match: {
           scheme: scheme._id,
           status: PAYMENT_STATUS.SUCCESS,
-          paymentDate: { $gt: schemeDoc.sixMonthDate },
+          ...laterMatch,
         },
       },
       { $group: { _id: null, total: { $sum: "$amount" } } },
@@ -321,7 +417,12 @@ describe("financial hardening", () => {
         await AuditLog.countDocuments({ action: AUDIT_ACTIONS.PAYMENT_COLLECTED }),
         0
       );
-      assert.equal(await IdempotencyRecord.countDocuments(), 0);
+      assert.equal(
+        await IdempotencyRecord.countDocuments({
+          operationType: IDEMPOTENCY_OPERATIONS.PAYMENT_COLLECT,
+        }),
+        0
+      );
     } finally {
       AuditLog.create = originalCreate;
     }
@@ -442,26 +543,8 @@ describe("financial hardening", () => {
     await pay(customer, scheme, admin, 10000, PAYMENT_METHODS.UPI);
 
     const results = await Promise.allSettled([
-      updateSchemeStatus(
-        scheme._id,
-        {
-          status: SCHEME_STATUS.REDEEMED,
-          settlementAmount: 10000,
-          notes: "Redeem test",
-          clientRequestId: reqId(),
-        },
-        admin
-      ),
-      updateSchemeStatus(
-        scheme._id,
-        {
-          status: SCHEME_STATUS.REDEEMED,
-          settlementAmount: 10000,
-          notes: "Redeem test",
-          clientRequestId: reqId(),
-        },
-        admin
-      ),
+      settleScheme(scheme._id, admin, { notes: "Redeem test", clientRequestId: reqId() }),
+      settleScheme(scheme._id, admin, { notes: "Redeem test", clientRequestId: reqId() }),
     ]);
 
     const fulfilled = results.filter((result) => result.status === "fulfilled");
@@ -475,16 +558,7 @@ describe("financial hardening", () => {
     const { customer, scheme } = await seedCustomerScheme(admin);
     await pay(customer, scheme, admin, 8000, PAYMENT_METHODS.BANK);
 
-    await updateSchemeStatus(
-      scheme._id,
-      {
-        status: SCHEME_STATUS.REDEEMED,
-        settlementAmount: 8000,
-        notes: "Settled",
-        clientRequestId: reqId(),
-      },
-      admin
-    );
+    await settleScheme(scheme._id, admin, { notes: "Settled" });
 
     const firstReport = await getSettlementTotals();
     const secondReport = await getSettlementTotals();
@@ -500,16 +574,10 @@ describe("financial hardening", () => {
     const staff = await createStaff();
     const { customer, scheme } = await seedCustomerScheme(admin, new Date());
     await pay(customer, scheme, admin, 1000, PAYMENT_METHODS.UPI);
-    await updateSchemeStatus(
-      scheme._id,
-      {
-        status: SCHEME_STATUS.CLOSED,
-        settlementAmount: 1000,
-        notes: "Closed early",
-        clientRequestId: reqId(),
-      },
-      admin
-    );
+    await settleScheme(scheme._id, admin, {
+      status: SCHEME_STATUS.CLOSED,
+      notes: "Closed early",
+    });
 
     await expectStatus(() => pay(customer, scheme, staff, 1000), 409);
   });
@@ -520,16 +588,7 @@ describe("financial hardening", () => {
     const { customer, scheme } = await seedCustomerScheme(admin);
     const payment = await pay(customer, scheme, staff, 4000, PAYMENT_METHODS.UPI);
 
-    await updateSchemeStatus(
-      scheme._id,
-      {
-        status: SCHEME_STATUS.REDEEMED,
-        settlementAmount: 4000,
-        notes: "Settled",
-        clientRequestId: reqId(),
-      },
-      admin
-    );
+    await settleScheme(scheme._id, admin, { notes: "Settled" });
 
     await expectStatus(
       createCorrectionRequest(
@@ -674,11 +733,13 @@ describe("financial hardening", () => {
     assert.equal(resolved.canMarkClosed, false);
   });
 
-  it("19b. staff permissions default to operational access when unset", () => {
+  it("19b. staff permissions default to deny-by-default when unset", () => {
     const resolved = resolveStaffPermissions({});
-    assert.equal(resolved.canViewReports, true);
-    assert.equal(resolved.canMarkRedeemed, true);
+    assert.equal(resolved.canViewReports, false);
+    assert.equal(resolved.canMarkRedeemed, false);
     assert.equal(resolved.canSubmitCash, false);
+    assert.equal(resolved.canCollectPayment, false);
+    assert.equal(resolved.canFinalizeSettlement, false);
   });
 
   it("20. staff cannot access another staff member's restricted payment or receipt", async () => {
@@ -721,15 +782,16 @@ describe("financial hardening", () => {
     const { customer, scheme } = await seedCustomerScheme(admin);
 
     await expectStatus(
-      collectPayment(
-        {
-          customer: customer._id.toString(),
-          scheme: scheme._id.toString(),
-          amount: 1000,
-          paymentMethod: PAYMENT_METHODS.CASH,
-          paymentDate: EARLY_PAYMENT_DATE,
-        },
-        staff
+      withMockedNow(firstPeriodTime(), () =>
+        collectPayment(
+          {
+            customer: customer._id.toString(),
+            scheme: scheme._id.toString(),
+            amount: 1000,
+            paymentMethod: PAYMENT_METHODS.CASH,
+          },
+          staff
+        )
       ),
       400
     );
@@ -777,7 +839,12 @@ describe("financial hardening", () => {
         await AuditLog.countDocuments({ action: AUDIT_ACTIONS.PAYMENT_COLLECTED }),
         0
       );
-      assert.equal(await IdempotencyRecord.countDocuments(), 0);
+      assert.equal(
+        await IdempotencyRecord.countDocuments({
+          operationType: IDEMPOTENCY_OPERATIONS.PAYMENT_COLLECT,
+        }),
+        0
+      );
       assert.equal(await PaymentCorrection.countDocuments(), 0);
       assert.equal(await Scheme.countDocuments({ "settlement.amount": { $exists: true } }), 0);
     } finally {
@@ -836,16 +903,7 @@ describe("financial hardening", () => {
     const staff = await createStaff();
     const { customer, scheme } = await seedCustomerScheme(admin);
     await pay(customer, scheme, staff, 4000, PAYMENT_METHODS.CASH);
-    await updateSchemeStatus(
-      scheme._id,
-      {
-        status: SCHEME_STATUS.REDEEMED,
-        settlementAmount: 4000,
-        notes: "Settled",
-        clientRequestId: reqId(),
-      },
-      admin
-    );
+    await settleScheme(scheme._id, admin, { notes: "Settled" });
 
     await expectApiError(
       pay(customer, scheme, staff, 1000, PAYMENT_METHODS.CASH, { clientRequestId: reqId() }),
@@ -923,5 +981,242 @@ describe("financial hardening", () => {
         retryable: true,
       }
     );
+  });
+
+  describe("phase 1 scheme window", () => {
+    it("accepts payment exactly at startDate and rejects 1ms before start", async () => {
+      const admin = await createAdmin();
+      const staff = await createStaff();
+      const { customer, scheme } = await seedCustomerScheme(admin);
+      const { startDate } = schemeWindowForStart();
+
+      await pay(customer, scheme, staff, 1000, PAYMENT_METHODS.CASH, { at: startDate });
+
+      await expectApiError(
+        pay(customer, scheme, staff, 1000, PAYMENT_METHODS.CASH, {
+          at: new Date(startDate.getTime() - 1),
+        }),
+        {
+          statusCode: 409,
+          code: ERROR_CODES.PAYMENT_BEFORE_SCHEME_START,
+          retryable: false,
+        }
+      );
+    });
+
+    it("classifies laterPeriodStart boundaries correctly", async () => {
+      const admin = await createAdmin();
+      const staff = await createStaff();
+      const { customer, scheme } = await seedCustomerScheme(admin);
+      const window = schemeWindowForStart();
+
+      await pay(customer, scheme, admin, 5000, PAYMENT_METHODS.CASH, {
+        at: new Date(window.laterPeriodStart.getTime() - 1),
+      });
+
+      await pay(customer, scheme, staff, 1000, PAYMENT_METHODS.CASH, {
+        at: window.laterPeriodStart,
+      });
+
+      await pay(customer, scheme, staff, 1000, PAYMENT_METHODS.CASH, {
+        at: new Date(window.laterPeriodStart.getTime() + 12 * 60 * 60 * 1000),
+      });
+
+      const schemeDoc = await Scheme.findById(scheme._id);
+      const firstMatch = buildPeriodPaymentMatch(schemeDoc, PAYMENT_PERIODS.FIRST);
+      const laterMatch = buildPeriodPaymentMatch(schemeDoc, PAYMENT_PERIODS.LATER);
+      const [firstTotal, laterTotal] = await Promise.all([
+        Payment.aggregate([
+          { $match: { scheme: scheme._id, status: PAYMENT_STATUS.SUCCESS, ...firstMatch } },
+          { $group: { _id: null, total: { $sum: "$amount" } } },
+        ]),
+        Payment.aggregate([
+          { $match: { scheme: scheme._id, status: PAYMENT_STATUS.SUCCESS, ...laterMatch } },
+          { $group: { _id: null, total: { $sum: "$amount" } } },
+        ]),
+      ]);
+      assert.equal(firstTotal[0]?.total || 0, 5000);
+      assert.equal(laterTotal[0]?.total || 0, 2000);
+    });
+
+    it("rejects payment at and after maturity", async () => {
+      const admin = await createAdmin();
+      const staff = await createStaff();
+      const { customer, scheme } = await seedCustomerScheme(admin);
+      const { maturityDate } = schemeWindowForStart();
+
+      await pay(customer, scheme, admin, 1000, PAYMENT_METHODS.CASH, { at: firstPeriodTime() });
+
+      await pay(customer, scheme, admin, 1000, PAYMENT_METHODS.CASH, {
+        at: new Date(maturityDate.getTime() - 1),
+      });
+
+      await expectApiError(
+        pay(customer, scheme, staff, 1000, PAYMENT_METHODS.CASH, { at: maturityDate }),
+        {
+          statusCode: 409,
+          code: ERROR_CODES.PAYMENT_AFTER_MATURITY,
+          retryable: false,
+        }
+      );
+
+      await expectApiError(
+        pay(customer, scheme, staff, 1000, PAYMENT_METHODS.CASH, {
+          at: new Date(maturityDate.getTime() + 1000),
+        }),
+        {
+          statusCode: 409,
+          code: ERROR_CODES.PAYMENT_AFTER_MATURITY,
+          retryable: false,
+        }
+      );
+    });
+
+    it("rejects caller-supplied paymentDate on normal collection", async () => {
+      const admin = await createAdmin();
+      const staff = await createStaff();
+      const { customer, scheme } = await seedCustomerScheme(admin);
+
+      await expectApiError(
+        withMockedNow(firstPeriodTime(), () =>
+          collectPayment(
+            {
+              customer: customer._id.toString(),
+              scheme: scheme._id.toString(),
+              amount: 1000,
+              paymentMethod: PAYMENT_METHODS.CASH,
+              paymentDate: firstPeriodTime().toISOString(),
+              clientRequestId: reqId(),
+            },
+            staff
+          )
+        ),
+        {
+          statusCode: 409,
+          code: ERROR_CODES.PAYMENT_DATE_NOT_ALLOWED,
+          retryable: false,
+        }
+      );
+    });
+
+    it("rejects later-period payment when first-period total is zero", async () => {
+      const admin = await createAdmin();
+      const staff = await createStaff();
+      const { customer, scheme } = await seedCustomerScheme(admin);
+
+      await expectApiError(
+        pay(customer, scheme, staff, 1000, PAYMENT_METHODS.CASH, { at: laterPeriodTime() }),
+        {
+          statusCode: 409,
+          code: ERROR_CODES.PAYMENT_LIMIT_EXCEEDED,
+          retryable: false,
+        }
+      );
+    });
+
+    it("enforces later-period cap at, below, and above remaining capacity", async () => {
+      const admin = await createAdmin();
+      const staff = await createStaff();
+      const { customer, scheme } = await seedCustomerScheme(admin);
+
+      await pay(customer, scheme, admin, 10000, PAYMENT_METHODS.CASH, { at: firstPeriodTime() });
+
+      await pay(customer, scheme, staff, 9999, PAYMENT_METHODS.CASH, { at: laterPeriodTime() });
+
+      await pay(customer, scheme, staff, 1, PAYMENT_METHODS.CASH, { at: laterPeriodTime() });
+
+      await expectApiError(
+        pay(customer, scheme, staff, 1, PAYMENT_METHODS.CASH, { at: laterPeriodTime() }),
+        {
+          statusCode: 409,
+          code: ERROR_CODES.PAYMENT_LIMIT_EXCEEDED,
+          retryable: false,
+        }
+      );
+    });
+
+    it("uses combined first-period total rather than an average", async () => {
+      const admin = await createAdmin();
+      const staff = await createStaff();
+      const { customer, scheme } = await seedCustomerScheme(admin);
+      const when = firstPeriodTime();
+
+      await pay(customer, scheme, admin, 4000, PAYMENT_METHODS.CASH, { at: when });
+      await pay(customer, scheme, admin, 6000, PAYMENT_METHODS.CASH, { at: when });
+
+      await pay(customer, scheme, staff, 10000, PAYMENT_METHODS.CASH, { at: laterPeriodTime() });
+
+      await expectApiError(
+        pay(customer, scheme, staff, 1, PAYMENT_METHODS.CASH, { at: laterPeriodTime() }),
+        {
+          statusCode: 409,
+          code: ERROR_CODES.PAYMENT_LIMIT_EXCEEDED,
+          retryable: false,
+        }
+      );
+    });
+
+    it("rejects admin over-cap attempt even with legacy overrideReason", async () => {
+      const admin = await createAdmin();
+      const { customer, scheme } = await seedCustomerScheme(admin);
+
+      await pay(customer, scheme, admin, 5000, PAYMENT_METHODS.CASH, { at: firstPeriodTime() });
+
+      await expectApiError(
+        withMockedNow(laterPeriodTime(), () =>
+          collectPayment(
+            {
+              customer: customer._id.toString(),
+              scheme: scheme._id.toString(),
+              amount: 6000,
+              paymentMethod: PAYMENT_METHODS.CASH,
+              overrideReason: "legacy admin override",
+              clientRequestId: reqId(),
+            },
+            admin
+          )
+        ),
+        {
+          statusCode: 409,
+          code: ERROR_CODES.PAYMENT_LIMIT_EXCEEDED,
+          retryable: false,
+        }
+      );
+    });
+
+    it("denies customer role from collecting payments", async () => {
+      const customerUser = await User.create({
+        name: "Customer User",
+        phone: `6${String(Date.now()).slice(-8)}${Math.floor(Math.random() * 9)}`,
+        passwordHash: await bcrypt.hash("custpass1", 10),
+        role: USER_ROLES.CUSTOMER,
+      });
+
+      await expectStatus(assertCollectorAllowed(customerUser), 403);
+    });
+
+    it("handles Asia/Kolkata midnight relative to UTC for scheme start", async () => {
+      const admin = await createAdmin();
+      const staff = await createStaff();
+      const { customer, scheme } = await seedCustomerScheme(admin, "2025-01-01");
+      const { startDate } = schemeWindowForStart("2025-01-01");
+
+      assert.equal(startDate.toISOString(), "2024-12-31T18:30:00.000Z");
+
+      await expectApiError(
+        pay(customer, scheme, staff, 1000, PAYMENT_METHODS.CASH, {
+          at: new Date("2024-12-31T18:29:59.999Z"),
+        }),
+        {
+          statusCode: 409,
+          code: ERROR_CODES.PAYMENT_BEFORE_SCHEME_START,
+          retryable: false,
+        }
+      );
+
+      await pay(customer, scheme, staff, 1000, PAYMENT_METHODS.CASH, {
+        at: new Date("2024-12-31T18:30:00.000Z"),
+      });
+    });
   });
 });

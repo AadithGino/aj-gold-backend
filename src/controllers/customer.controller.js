@@ -69,7 +69,7 @@ const createCustomerHandler = asyncHandler(async (req, res) => {
 });
 
 const listCustomersHandler = asyncHandler(async (req, res) => {
-  const items = await searchCustomers(req.query.search || "");
+  const items = await searchCustomers(req.query.search || "", req.user);
 
   return res.status(200).json({
     success: true,
@@ -78,7 +78,7 @@ const listCustomersHandler = asyncHandler(async (req, res) => {
 });
 
 const getCustomerHandler = asyncHandler(async (req, res) => {
-  const detail = await getCustomerDetail(req.params.customerId);
+  const detail = await getCustomerDetail(req.params.customerId, req.user);
 
   return res.status(200).json({
     success: true,
@@ -107,7 +107,7 @@ const resetCustomerPasswordHandler = asyncHandler(async (req, res) => {
 });
 
 const getCustomerSchemesHandler = asyncHandler(async (req, res) => {
-  const schemes = await getCustomerSchemes(req.params.customerId);
+  const schemes = await getCustomerSchemes(req.params.customerId, req.user);
 
   return res.status(200).json({
     success: true,
