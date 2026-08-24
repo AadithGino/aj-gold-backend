@@ -7,13 +7,41 @@ const { ERROR_CODES } = require("../constants/errorCodes");
 
 const isDuplicateKeyError = (error) => error?.code === 11000;
 
+const normalizeValue = (value) => {
+  if (value == null) return null;
+  if (value instanceof Date) return value.toISOString();
+  if (Array.isArray(value)) return value.map((item) => normalizeValue(item));
+  if (typeof value === "object") {
+    if (value?._id) {
+      return String(value._id);
+    }
+    return Object.keys(value)
+      .sort()
+      .reduce((acc, key) => {
+        acc[key] = normalizeValue(value[key]);
+        return acc;
+      }, {});
+  }
+  return typeof value === "string" ? value : String(value);
+};
+
+const stableSerialize = (value) => JSON.stringify(normalizeValue(value));
+
 const journalEntryMatches = (existing, expected) =>
   existing.eventType === expected.eventType &&
   existing.amount === expected.amount &&
   existing.debitAccount === expected.debitAccount &&
   existing.creditAccount === expected.creditAccount &&
+  String(existing.customer || "") === String(expected.customer || "") &&
+  String(existing.scheme || "") === String(expected.scheme || "") &&
   String(existing.sourceRecordType || "") === String(expected.sourceRecordType || "") &&
-  String(existing.sourceRecordId || "") === String(expected.sourceRecordId || "");
+  String(existing.sourceRecordId || "") === String(expected.sourceRecordId || "") &&
+  String(existing.actor || "") === String(expected.actor || "") &&
+  String(existing.actorRole || "") === String(expected.actorRole || "") &&
+  String(existing.clientRequestId || "") === String(expected.clientRequestId || "") &&
+  String(existing.reversalOf || "") === String(expected.reversalOf || "") &&
+  String(existing.compensates || "") === String(expected.compensates || "") &&
+  stableSerialize(existing.metadata || {}) === stableSerialize(expected.metadata || {});
 
 const appendJournalEntry = async (
   {
@@ -44,6 +72,12 @@ const appendJournalEntry = async (
   if (!Number.isInteger(amount) || amount <= 0) {
     throw new ApiError(400, "Journal amount must be a positive whole rupee value.");
   }
+  if (debitAccount === creditAccount) {
+    throw new ApiError(409, "Journal entry must affect two different accounts.", [], {
+      code: ERROR_CODES.JOURNAL_BUSINESS_KEY_MISMATCH,
+      retryable: false,
+    });
+  }
 
   const trimmedKey = businessKey.trim();
   const expectedPayload = {
@@ -51,8 +85,16 @@ const appendJournalEntry = async (
     amount,
     debitAccount,
     creditAccount,
+    customer,
+    scheme,
     sourceRecordType: sourceRecordType || "",
     sourceRecordId,
+    actor,
+    actorRole,
+    clientRequestId: clientRequestId?.trim() || "",
+    reversalOf,
+    compensates,
+    metadata,
   };
 
   const existing = await FinancialJournal.findOne({ businessKey: trimmedKey }).session(

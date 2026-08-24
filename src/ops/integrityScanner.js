@@ -14,6 +14,7 @@ const {
   SETTLEMENT_STATUSES,
   CASH_SUBMISSION_STATUS,
   CORRECTION_STATUS,
+  JOURNAL_EVENT_TYPES,
 } = require("../constants/enums");
 const { verifyRequiredIndexes } = require("./requiredIndexes");
 const { verifyMigrationsApplied, loadMigrationFiles } = require("../migrations/runMigrations");
@@ -30,6 +31,14 @@ const DEFAULT_FINDING_LIMIT = 500;
 const addFinding = (findings, severity, code, message, details = {}) => {
   findings.push({ severity, code, message, details });
 };
+
+const STAFF_ATTRIBUTION_EVENTS = new Set([
+  JOURNAL_EVENT_TYPES.COLLECTION_RECEIVED,
+  JOURNAL_EVENT_TYPES.COLLECTION_REVERSAL,
+  JOURNAL_EVENT_TYPES.COLLECTION_ADJUSTMENT,
+  JOURNAL_EVENT_TYPES.STAFF_CASH_SUBMITTED,
+  JOURNAL_EVENT_TYPES.VAULT_REVERSAL,
+]);
 
 const paginateFindings = (findings, { offset = 0, limit = DEFAULT_FINDING_LIMIT } = {}) => {
   const safeOffset = Math.max(0, Number(offset) || 0);
@@ -161,6 +170,29 @@ const scanIntegrity = async ({ db, offset = 0, limit = DEFAULT_FINDING_LIMIT } =
         correctionId: pendingCorrection._id,
       });
     }
+
+    const postSettlementPayments = await Payment.find({
+      scheme: scheme._id,
+      status: PAYMENT_STATUS.SUCCESS,
+      paymentDate: { $gt: scheme.settlement?.settledAt || new Date(0) },
+    })
+      .select("_id paymentDate")
+      .limit(20)
+      .lean();
+    for (const payment of postSettlementPayments) {
+      addFinding(
+        findings,
+        CRITICAL,
+        "POST_SETTLEMENT_MUTATION",
+        "Successful payment exists after settlement timestamp.",
+        {
+          schemeId: scheme._id,
+          paymentId: payment._id,
+          paymentDate: payment.paymentDate,
+          settledAt: scheme.settlement?.settledAt || null,
+        }
+      );
+    }
   }
 
   const journalDupes = await FinancialJournal.aggregate([
@@ -171,6 +203,33 @@ const scanIntegrity = async ({ db, offset = 0, limit = DEFAULT_FINDING_LIMIT } =
     addFinding(findings, CRITICAL, "JOURNAL_DUPLICATE_BUSINESS_KEY", "Duplicate journal businessKey.", {
       businessKey: row._id,
       count: row.count,
+    });
+  }
+
+  const allBusinessKeys = await FinancialJournal.aggregate([
+    {
+      $group: {
+        _id: "$businessKey",
+        variants: {
+          $addToSet: {
+            eventType: "$eventType",
+            amount: "$amount",
+            debitAccount: "$debitAccount",
+            creditAccount: "$creditAccount",
+            sourceRecordType: "$sourceRecordType",
+            sourceRecordId: "$sourceRecordId",
+            actor: "$actor",
+            metadata: "$metadata",
+          },
+        },
+      },
+    },
+    { $match: { "variants.1": { $exists: true } } },
+  ]);
+  for (const row of allBusinessKeys) {
+    addFinding(findings, CRITICAL, "JOURNAL_BUSINESS_KEY_PAYLOAD_MISMATCH", "Business key maps to multiple payload variants.", {
+      businessKey: row._id,
+      variantCount: row.variants.length,
     });
   }
 
@@ -186,6 +245,28 @@ const scanIntegrity = async ({ db, offset = 0, limit = DEFAULT_FINDING_LIMIT } =
     });
   }
 
+  const missingStaffAttribution = await FinancialJournal.find({
+    eventType: { $in: Array.from(STAFF_ATTRIBUTION_EVENTS) },
+    $and: [
+      {
+        $or: [{ actor: { $exists: false } }, { actor: null }],
+      },
+      {
+        $or: [{ "metadata.staffId": { $exists: false } }, { "metadata.staffId": null }],
+      },
+    ],
+  })
+    .select("entryId businessKey eventType")
+    .limit(50)
+    .lean();
+  for (const entry of missingStaffAttribution) {
+    addFinding(findings, CRITICAL, "MISSING_STAFF_ATTRIBUTION", "Journal entry missing staff attribution metadata.", {
+      entryId: entry.entryId,
+      businessKey: entry.businessKey,
+      eventType: entry.eventType,
+    });
+  }
+
   const reversedSubmissions = await CashSubmission.find({
     status: CASH_SUBMISSION_STATUS.REVERSED,
   }).lean();
@@ -197,6 +278,44 @@ const scanIntegrity = async ({ db, offset = 0, limit = DEFAULT_FINDING_LIMIT } =
       addFinding(findings, CRITICAL, "DUPLICATE_CASH_SUBMISSION_REVERSAL", "Cash submission reversed more than once in journal.", {
         submissionId: submission._id,
         reversalCount,
+      });
+    }
+  }
+
+  const approvedCorrections = await PaymentCorrection.find({
+    status: CORRECTION_STATUS.APPROVED,
+  })
+    .select("_id payment beforeSnapshot afterSnapshot correctionType")
+    .lean();
+  for (const correction of approvedCorrections) {
+    const before = correction.beforeSnapshot || {};
+    const after = correction.afterSnapshot || {};
+    const financialChange =
+      before.amount !== after.amount ||
+      before.paymentMethod !== after.paymentMethod ||
+      before.status !== after.status;
+    if (!financialChange) {
+      continue;
+    }
+
+    const correctionJournalCount = await FinancialJournal.countDocuments({
+      $or: [
+        {
+          sourceRecordType: "PaymentCorrection",
+          sourceRecordId: correction._id,
+          eventType: JOURNAL_EVENT_TYPES.COLLECTION_ADJUSTMENT,
+        },
+        {
+          sourceRecordType: "Payment",
+          sourceRecordId: correction.payment,
+          eventType: JOURNAL_EVENT_TYPES.COLLECTION_REVERSAL,
+        },
+      ],
+    });
+    if (correctionJournalCount === 0) {
+      addFinding(findings, CRITICAL, "EFFECTIVE_PAYMENT_JOURNAL_MISMATCH", "Financial correction has no compensating journal entries.", {
+        correctionId: correction._id,
+        paymentId: correction.payment,
       });
     }
   }

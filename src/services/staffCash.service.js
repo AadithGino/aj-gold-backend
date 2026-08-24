@@ -150,7 +150,7 @@ const assertNoNegativeCashAfterPaymentChange = async ({
   if (!staffId) return;
 
   const summary = await getStaffCashInHand(staffId, session);
-  let adjusted = summary.aggregateCashInHand;
+  let adjusted = summary.cashInHand;
 
   if (previousMethod === PAYMENT_METHODS.CASH) {
     adjusted -= previousAmount;
@@ -162,7 +162,12 @@ const assertNoNegativeCashAfterPaymentChange = async ({
   if (adjusted < 0) {
     throw new ApiError(
       409,
-      "This change would make staff cash in hand negative. Resolve cash submissions first."
+      "This change would make staff cash in hand negative. Resolve cash submissions first.",
+      [],
+      {
+        code: ERROR_CODES.CASH_BALANCE_CONFLICT,
+        retryable: false,
+      }
     );
   }
 };

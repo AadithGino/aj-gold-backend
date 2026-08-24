@@ -53,7 +53,17 @@ const blockMutation = function blockMutation() {
 };
 
 financialJournalSchema.pre(
-  ["updateOne", "updateMany", "findOneAndUpdate", "deleteOne", "deleteMany", "replaceOne", "findOneAndReplace"],
+  [
+    "updateOne",
+    "updateMany",
+    "findOneAndUpdate",
+    "deleteOne",
+    "deleteMany",
+    "findOneAndDelete",
+    "replaceOne",
+    "findOneAndReplace",
+    "bulkWrite",
+  ],
   blockMutation
 );
 

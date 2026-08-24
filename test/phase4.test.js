@@ -14,6 +14,7 @@ const {
   USER_ROLES,
   PAYMENT_METHODS,
   JOURNAL_EVENT_TYPES,
+  CORRECTION_TYPES,
 } = require("../src/constants/enums");
 const { ERROR_CODES } = require("../src/constants/errorCodes");
 const { collectPayment } = require("../src/services/payment.service");
@@ -21,10 +22,17 @@ const {
   createCashSubmission,
   reverseCashSubmission,
 } = require("../src/services/cash.service");
+const {
+  createCorrectionRequest,
+  approveCorrection,
+} = require("../src/services/correction.service");
 const { createCustomer } = require("../src/services/customer.service");
 const { createScheme } = require("../src/services/schemeManagement.service");
 const { buildReconciliationSummary } = require("../src/services/reconciliation.service");
 const { getStaffCustodyBalance } = require("../src/services/financialJournal.service");
+const { appendJournalEntry } = require("../src/services/financialJournal.service");
+const { JOURNAL_ACCOUNTS } = require("../src/constants/journalAccounts");
+const { scanIntegrity } = require("../src/ops/integrityScanner");
 const { processOutboxBatch } = require("../src/services/outbox.service");
 const { FULL_OPERATIONAL_STAFF_PERMISSIONS } = require("./helpers/staffTestPermissions");
 const { runMigrations } = require("../src/migrations/runMigrations");
@@ -119,6 +127,7 @@ describe("Phase 4 custody, reconciliation, timezone, outbox", () => {
     for (const collection of Object.values(mongoose.connection.collections)) {
       await collection.deleteMany({});
     }
+    await mongoose.connection.db.collection("journal_migration_ambiguous").deleteMany({});
     await runMigrations(mongoose.connection.db);
   });
 
@@ -254,6 +263,164 @@ describe("Phase 4 custody, reconciliation, timezone, outbox", () => {
     assert.equal(await getStaffCustodyBalance(staff._id), 6000);
   });
 
+  it("repeated reversal (same and different idempotency key) does not create second effect", async () => {
+    const admin = await createAdmin();
+    const staff = await createStaff();
+    const customer = await createCustomer(
+      {
+        name: "Reverse Idempotency Customer",
+        phone: `7${String(Date.now()).slice(-8)}9`,
+        password: "customer1pass",
+      },
+      admin
+    );
+    const scheme = await createScheme(
+      { customerId: customer._id.toString(), startDate: "2025-01-01", clientRequestId: reqId() },
+      admin
+    );
+    await pay(customer, scheme, staff, 4000, PAYMENT_METHODS.CASH);
+    const { submission } = await createCashSubmission(
+      {
+        staff: staff._id.toString(),
+        submittedAmount: 4000,
+        clientRequestId: reqId(),
+      },
+      admin
+    );
+
+    const reverseKey = reqId();
+    await reverseCashSubmission(
+      submission._id,
+      { reason: "initial reversal", clientRequestId: reverseKey },
+      admin
+    );
+    await reverseCashSubmission(
+      submission._id,
+      { reason: "initial reversal", clientRequestId: reverseKey },
+      admin
+    );
+
+    await assert.rejects(
+      reverseCashSubmission(
+        submission._id,
+        { reason: "different key replay", clientRequestId: reqId() },
+        admin
+      ),
+      (error) => error.code === ERROR_CODES.CASH_SUBMISSION_ALREADY_REVERSED
+    );
+
+    const reversalEntries = await FinancialJournal.find({
+      businessKey: `cash-submission:${submission._id}:reversal`,
+    });
+    assert.equal(reversalEntries.length, 1);
+  });
+
+  it("concurrent submissions cannot overdraw staff custody", async () => {
+    const admin = await createAdmin();
+    const staff = await createStaff();
+    const customer = await createCustomer(
+      {
+        name: "Concurrent Submission Customer",
+        phone: `7${String(Date.now()).slice(-8)}8`,
+        password: "customer1pass",
+      },
+      admin
+    );
+    const scheme = await createScheme(
+      { customerId: customer._id.toString(), startDate: "2025-01-01", clientRequestId: reqId() },
+      admin
+    );
+    await pay(customer, scheme, staff, 5000, PAYMENT_METHODS.CASH);
+
+    const [first, second] = await Promise.allSettled([
+      createCashSubmission(
+        {
+          staff: staff._id.toString(),
+          submittedAmount: 4000,
+          clientRequestId: reqId(),
+        },
+        admin
+      ),
+      createCashSubmission(
+        {
+          staff: staff._id.toString(),
+          submittedAmount: 4000,
+          clientRequestId: reqId(),
+        },
+        admin
+      ),
+    ]);
+
+    const fulfilled = [first, second].filter((result) => result.status === "fulfilled");
+    const rejected = [first, second].filter((result) => result.status === "rejected");
+    assert.equal(fulfilled.length, 1);
+    assert.equal(rejected.length, 1);
+    assert.equal(rejected[0].reason.code, ERROR_CODES.INSUFFICIENT_STAFF_CASH);
+    assert.equal(await getStaffCustodyBalance(staff._id), 1000);
+  });
+
+  it("correction amount/method chain updates custody with unwind/apply entries", async () => {
+    const admin = await createAdmin();
+    const staff = await createStaff();
+    const customer = await createCustomer(
+      {
+        name: "Correction Custody Customer",
+        phone: `7${String(Date.now()).slice(-8)}7`,
+        password: "customer1pass",
+      },
+      admin
+    );
+    const scheme = await createScheme(
+      { customerId: customer._id.toString(), startDate: "2025-01-01", clientRequestId: reqId() },
+      admin
+    );
+    const paymentResult = await pay(customer, scheme, staff, 5000, PAYMENT_METHODS.CASH);
+    assert.equal(await getStaffCustodyBalance(staff._id), 5000);
+
+    const amountCorrection = await createCorrectionRequest(
+      paymentResult.payment._id,
+      { correctionType: CORRECTION_TYPES.EDIT_AMOUNT, requestedValue: 4500, reason: "amount fix" },
+      staff
+    );
+    await approveCorrection(
+      amountCorrection._id,
+      { reviewClientRequestId: reqId(), reviewNotes: "ok" },
+      admin
+    );
+    assert.equal(await getStaffCustodyBalance(staff._id), 4500);
+
+    const refCorrection = await createCorrectionRequest(
+      paymentResult.payment._id,
+      { correctionType: CORRECTION_TYPES.EDIT_REFERENCE, requestedValue: "UPI-CP4-1", reason: "add reference" },
+      staff
+    );
+    await approveCorrection(
+      refCorrection._id,
+      { reviewClientRequestId: reqId(), reviewNotes: "ok" },
+      admin
+    );
+
+    const methodCorrection = await createCorrectionRequest(
+      paymentResult.payment._id,
+      { correctionType: CORRECTION_TYPES.EDIT_METHOD, requestedValue: PAYMENT_METHODS.UPI, reason: "switch method" },
+      staff
+    );
+    await approveCorrection(
+      methodCorrection._id,
+      { reviewClientRequestId: reqId(), reviewNotes: "ok" },
+      admin
+    );
+
+    const adjustments = await FinancialJournal.find({
+      sourceRecordType: "PaymentCorrection",
+      sourceRecordId: methodCorrection._id,
+      eventType: JOURNAL_EVENT_TYPES.COLLECTION_ADJUSTMENT,
+    }).lean();
+    assert.ok(adjustments.some((row) => row.metadata?.phase === "unwind"));
+    assert.ok(adjustments.some((row) => row.metadata?.phase === "apply"));
+    assert.equal(await getStaffCustodyBalance(staff._id), 0);
+  });
+
   it("reconciliation summary balances after collect and submit", async () => {
     const admin = await createAdmin();
     const staff = await createStaff();
@@ -276,6 +443,190 @@ describe("Phase 4 custody, reconciliation, timezone, outbox", () => {
     assert.equal(summary.flows.netCustomerCollected, 3000);
     assert.equal(summary.accounts.totalStaffCustody, 3000);
     assert.equal(summary.exceptions.length, 0);
+  });
+
+  it("all custody journal events include staff attribution", async () => {
+    const admin = await createAdmin();
+    const staff = await createStaff();
+    const customer = await createCustomer(
+      {
+        name: "Staff Attribution Customer",
+        phone: `7${String(Date.now()).slice(-8)}0`,
+        password: "customer1pass",
+      },
+      admin
+    );
+    const scheme = await createScheme(
+      { customerId: customer._id.toString(), startDate: "2025-01-01", clientRequestId: reqId() },
+      admin
+    );
+    const paymentResult = await pay(customer, scheme, staff, 2000, PAYMENT_METHODS.CASH);
+    const { submission } = await createCashSubmission(
+      {
+        staff: staff._id.toString(),
+        submittedAmount: 1000,
+        clientRequestId: reqId(),
+      },
+      admin
+    );
+    await reverseCashSubmission(
+      submission._id,
+      { reason: "reverse", clientRequestId: reqId() },
+      admin
+    );
+
+    const correction = await createCorrectionRequest(
+      paymentResult.payment._id,
+      { correctionType: CORRECTION_TYPES.EDIT_AMOUNT, requestedValue: 1500, reason: "reduce cash" },
+      staff
+    );
+    await approveCorrection(
+      correction._id,
+      { reviewClientRequestId: reqId(), reviewNotes: "ok" },
+      admin
+    );
+
+    const custodyEvents = await FinancialJournal.find({
+      eventType: {
+        $in: [
+          JOURNAL_EVENT_TYPES.COLLECTION_RECEIVED,
+          JOURNAL_EVENT_TYPES.COLLECTION_ADJUSTMENT,
+          JOURNAL_EVENT_TYPES.STAFF_CASH_SUBMITTED,
+          JOURNAL_EVENT_TYPES.VAULT_REVERSAL,
+        ],
+      },
+    }).lean();
+    assert.ok(custodyEvents.length > 0);
+    assert.ok(
+      custodyEvents.every((entry) => entry.metadata?.staffId || entry.actor)
+    );
+  });
+
+  it("journal mutation APIs reject update/delete/replace/bulkWrite", async () => {
+    const admin = await createAdmin();
+    const staff = await createStaff();
+    const customer = await createCustomer(
+      {
+        name: "Journal Immutable Customer",
+        phone: `7${String(Date.now()).slice(-8)}4`,
+        password: "customer1pass",
+      },
+      admin
+    );
+    const scheme = await createScheme(
+      { customerId: customer._id.toString(), startDate: "2025-01-01", clientRequestId: reqId() },
+      admin
+    );
+    await pay(customer, scheme, staff, 1000, PAYMENT_METHODS.CASH);
+    const entry = await FinancialJournal.findOne({});
+    assert.ok(entry);
+
+    await assert.rejects(FinancialJournal.updateOne({ _id: entry._id }, { amount: 99 }), /immutable/i);
+    await assert.rejects(FinancialJournal.updateMany({}, { amount: 99 }), /immutable/i);
+    await assert.rejects(FinancialJournal.deleteOne({ _id: entry._id }), /immutable/i);
+    await assert.rejects(FinancialJournal.deleteMany({}), /immutable/i);
+    await assert.rejects(
+      FinancialJournal.findOneAndUpdate({ _id: entry._id }, { amount: 99 }),
+      /immutable/i
+    );
+    await assert.rejects(
+      FinancialJournal.findOneAndDelete({ _id: entry._id }),
+      /immutable/i
+    );
+    await assert.rejects(
+      FinancialJournal.replaceOne({ _id: entry._id }, { ...entry.toObject(), amount: 99 }),
+      /immutable/i
+    );
+    await assert.rejects(
+      FinancialJournal.bulkWrite([{ updateOne: { filter: { _id: entry._id }, update: { $set: { amount: 99 } } } }]),
+      /immutable/i
+    );
+  });
+
+  it("business-key payload mismatch is rejected", async () => {
+    const admin = await createAdmin();
+    const key = `test:business-key:${reqId()}`;
+    await appendJournalEntry({
+      businessKey: key,
+      eventType: JOURNAL_EVENT_TYPES.VAULT_ADJUSTMENT,
+      amount: 1000,
+      debitAccount: JOURNAL_ACCOUNTS.VAULT,
+      creditAccount: JOURNAL_ACCOUNTS.CUSTOMER_SCHEME_LIABILITY,
+      sourceRecordType: "Test",
+      sourceRecordId: new mongoose.Types.ObjectId(),
+      actor: admin._id,
+      actorRole: admin.role,
+      metadata: { staffId: admin._id.toString() },
+    });
+
+    await assert.rejects(
+      appendJournalEntry({
+        businessKey: key,
+        eventType: JOURNAL_EVENT_TYPES.VAULT_ADJUSTMENT,
+        amount: 1200,
+        debitAccount: JOURNAL_ACCOUNTS.VAULT,
+        creditAccount: JOURNAL_ACCOUNTS.CUSTOMER_SCHEME_LIABILITY,
+        sourceRecordType: "Test",
+        sourceRecordId: new mongoose.Types.ObjectId(),
+        actor: admin._id,
+        actorRole: admin.role,
+      }),
+      (error) => error.code === ERROR_CODES.JOURNAL_BUSINESS_KEY_MISMATCH
+    );
+  });
+
+  it("integrity scanner reports seeded defects", async () => {
+    const customerId = new mongoose.Types.ObjectId();
+    await mongoose.connection.db.collection("journal_migration_ambiguous").insertOne({
+      migrationId: "test",
+      reason: "seeded ambiguity",
+      recordedAt: new Date(),
+    });
+    await FinancialJournal.collection.insertOne({
+      entryId: reqId(),
+      businessKey: `seed:self:${reqId()}`,
+      eventType: JOURNAL_EVENT_TYPES.VAULT_ADJUSTMENT,
+      amount: 500,
+      debitAccount: JOURNAL_ACCOUNTS.VAULT,
+      creditAccount: JOURNAL_ACCOUNTS.VAULT,
+      sourceRecordType: "Seed",
+      sourceRecordId: new mongoose.Types.ObjectId(),
+      effectiveAt: new Date(),
+      recordedAt: new Date(),
+      metadata: {},
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+    await FinancialJournal.collection.insertOne({
+      entryId: reqId(),
+      businessKey: `seed:missing-staff:${reqId()}`,
+      eventType: JOURNAL_EVENT_TYPES.STAFF_CASH_SUBMITTED,
+      amount: 300,
+      debitAccount: JOURNAL_ACCOUNTS.VAULT,
+      creditAccount: JOURNAL_ACCOUNTS.STAFF_CASH_CUSTODY,
+      customer: customerId,
+      scheme: new mongoose.Types.ObjectId(),
+      sourceRecordType: "Seed",
+      sourceRecordId: new mongoose.Types.ObjectId(),
+      effectiveAt: new Date(),
+      recordedAt: new Date(),
+      metadata: {},
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+
+    const report = await scanIntegrity({ db: mongoose.connection.db, limit: 100 });
+    const codes = new Set(report.findings.map((row) => row.code));
+    assert.ok(codes.has("MIGRATION_AMBIGUITY"));
+    assert.ok(codes.has("JOURNAL_SELF_BALANCE"));
+    assert.ok(codes.has("MISSING_STAFF_ATTRIBUTION"));
+    assert.equal(report.pagination.hasMore, false);
+  });
+
+  it("clean fixture produces no critical integrity findings", async () => {
+    const report = await scanIntegrity({ db: mongoose.connection.db, limit: 100 });
+    assert.equal(report.ok, true);
+    assert.equal(report.criticalCount, 0);
   });
 
   it("uses Asia/Kolkata day and ISO week boundaries", () => {
