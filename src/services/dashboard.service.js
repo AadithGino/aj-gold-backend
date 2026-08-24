@@ -64,8 +64,6 @@ const mapPaymentItem = (payment, effectiveMeta = null) => {
     enrollmentNumber,
     transactionReference: payment.transactionReference || null,
     notes: payment.notes || null,
-    isLimitOverride: Boolean(payment.isLimitOverride),
-    overrideReason: payment.overrideReason || null,
     createdAt: payment.createdAt,
     ...(effectiveMeta
       ? {

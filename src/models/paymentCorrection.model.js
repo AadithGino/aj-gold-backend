@@ -59,5 +59,16 @@ paymentCorrectionSchema.index(
   { payment: 1 },
   { unique: true, partialFilterExpression: { status: CORRECTION_STATUS.PENDING } }
 );
+paymentCorrectionSchema.index(
+  { payment: 1, version: 1 },
+  {
+    unique: true,
+    name: "uniq_payment_correction_version_approved",
+    partialFilterExpression: {
+      status: CORRECTION_STATUS.APPROVED,
+      version: { $exists: true, $type: "number", $gt: 0 },
+    },
+  }
+);
 
 module.exports = mongoose.model("PaymentCorrection", paymentCorrectionSchema);

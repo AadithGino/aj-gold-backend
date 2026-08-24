@@ -32,6 +32,17 @@ const REQUIRED_INDEXES = [
     label: "pending correction per payment",
   },
   {
+    collection: "paymentcorrections",
+    key: { payment: 1, version: 1 },
+    unique: true,
+    name: "uniq_payment_correction_version_approved",
+    partial: {
+      status: CORRECTION_STATUS.APPROVED,
+      version: { $exists: true, $type: "number", $gt: 0 },
+    },
+    label: "approved correction version per payment",
+  },
+  {
     collection: "payments",
     key: { scheme: 1, status: 1, paymentDate: -1 },
     label: "payments by scheme/status/date",

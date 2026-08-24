@@ -56,6 +56,8 @@ const buildPaymentSnapshot = (payment) => ({
   receiptNumber: payment.receiptNumber,
 });
 
+const isDuplicateKeyError = (error) => error?.code === 11000;
+
 const mapCorrection = (doc) => ({
   _id: doc._id,
   payment: doc.payment,
@@ -165,27 +167,31 @@ const createCorrectionRequest = async (paymentId, payload, actor) => {
   const requestedValue = validateRequestedValue(payload.correctionType, payload.requestedValue);
 
   const beforeSnapshot = await getEffectiveSnapshotForPayment(payment._id);
-  const version =
-    (await PaymentCorrection.countDocuments({
+  let correction;
+  try {
+    correction = await PaymentCorrection.create({
       payment: payment._id,
-      status: CORRECTION_STATUS.APPROVED,
-    })) + 1;
-
-  const correction = await PaymentCorrection.create({
-    payment: payment._id,
-    customer: payment.customer._id || payment.customer,
-    scheme: payment.scheme._id || payment.scheme,
-    requestedBy: actor._id,
-    requestedByRole: actor.role,
-    correctionType: payload.correctionType,
-    originalSnapshot: buildPaymentSnapshot(payment),
-    beforeSnapshot,
-    version,
-    requestedValue,
-    reason,
-    status: CORRECTION_STATUS.PENDING,
-    notes: payload.notes?.trim() || "",
-  });
+      customer: payment.customer._id || payment.customer,
+      scheme: payment.scheme._id || payment.scheme,
+      requestedBy: actor._id,
+      requestedByRole: actor.role,
+      correctionType: payload.correctionType,
+      originalSnapshot: buildPaymentSnapshot(payment),
+      beforeSnapshot,
+      requestedValue,
+      reason,
+      status: CORRECTION_STATUS.PENDING,
+      notes: payload.notes?.trim() || "",
+    });
+  } catch (error) {
+    if (isDuplicateKeyError(error)) {
+      throw new ApiError(409, "A pending correction already exists for this payment.", [], {
+        code: ERROR_CODES.PENDING_CORRECTION_EXISTS,
+        retryable: false,
+      });
+    }
+    throw error;
+  }
 
   await logAudit({
     actor: actor._id,
@@ -249,10 +255,10 @@ const resolveApprovedValues = (currentEffective, correction, approvedValue) => {
       break;
     }
     case CORRECTION_TYPES.EDIT_REFERENCE:
-      next.transactionReference = String(value);
+      next.transactionReference = String(value).trim();
       break;
     case CORRECTION_TYPES.EDIT_NOTES:
-      next.notes = String(value);
+      next.notes = String(value).trim();
       break;
     default:
       throw new ApiError(400, "Unsupported correction type.");
@@ -436,6 +442,16 @@ const approveCorrection = async (correctionId, payload, actor) => {
       session
     );
 
+    const latestApproved = await PaymentCorrection.findOne({
+      payment: correction.payment,
+      status: CORRECTION_STATUS.APPROVED,
+      _id: { $ne: correction._id },
+      version: { $exists: true, $gt: 0 },
+    })
+      .sort({ version: -1 })
+      .session(session);
+    const version = (latestApproved?.version || 0) + 1;
+
     await recordEffectiveStateCorrection(
       {
         correction,
@@ -454,6 +470,7 @@ const approveCorrection = async (correctionId, payload, actor) => {
         $set: {
           appliedSnapshot,
           afterSnapshot: appliedSnapshot,
+          version,
           requestedValue: payload.approvedValue != null ? approvedValue : correction.requestedValue,
         },
       },

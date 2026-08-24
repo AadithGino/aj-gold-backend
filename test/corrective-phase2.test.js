@@ -20,7 +20,7 @@ const {
   CORRECTION_STATUS,
 } = require("../src/constants/enums");
 const { ERROR_CODES } = require("../src/constants/errorCodes");
-const { collectPayment } = require("../src/services/payment.service");
+const { collectPayment, reversePayment } = require("../src/services/payment.service");
 const { createScheme, updateSchemeStatus } = require("../src/services/schemeManagement.service");
 const {
   createCorrectionRequest,
@@ -122,7 +122,7 @@ const pay = async (customer, scheme, actor, amount, method = PAYMENT_METHODS.CAS
     )
   );
 
-describe("Corrective Phase 2 — canonical effective payments and corrections", () => {
+describe("Corrective Phase 3 — canonical effective payments and corrections", () => {
   before(async () => {
     replSet = await MongoMemoryReplSet.create({
       replSet: { count: 1, storageEngine: "wiredTiger" },
@@ -205,6 +205,17 @@ describe("Corrective Phase 2 — canonical effective payments and corrections", 
     assert.equal(effective.amount, 4500);
     assert.equal(effective.transactionReference, "REF-CP2-1");
     assert.equal(effective.notes, "Final note");
+
+    const approved = await PaymentCorrection.find({
+      payment: paymentResult.payment._id,
+      status: CORRECTION_STATUS.APPROVED,
+    })
+      .sort({ version: 1 })
+      .lean();
+    assert.deepEqual(
+      approved.map((row) => row.version),
+      [1, 2, 3]
+    );
   });
 
   it("requester cannot approve their own correction", async () => {
@@ -290,6 +301,29 @@ describe("Corrective Phase 2 — canonical effective payments and corrections", 
     const correction = await createCorrectionRequest(
       paymentResult.payment._id,
       { correctionType: CORRECTION_TYPES.EDIT_AMOUNT, requestedValue: 7000, reason: "Over cap" },
+      staff
+    );
+
+    await assert.rejects(
+      approveCorrection(
+        correction._id,
+        { reviewClientRequestId: reqId(), reviewNotes: "approve" },
+        admin
+      ),
+      (error) => error.code === ERROR_CODES.PAYMENT_LIMIT_EXCEEDED
+    );
+  });
+
+  it("rejects first-period reduction that would invalidate existing later-period totals", async () => {
+    const admin = await createAdmin();
+    const staff = await createStaff();
+    const { customer, scheme } = await seedCustomerScheme(admin);
+    const firstPeriodPayment = await pay(customer, scheme, staff, 10000, PAYMENT_METHODS.CASH, firstPeriodTime());
+    await pay(customer, scheme, staff, 7000, PAYMENT_METHODS.CASH, laterPeriodTime());
+
+    const correction = await createCorrectionRequest(
+      firstPeriodPayment.payment._id,
+      { correctionType: CORRECTION_TYPES.EDIT_AMOUNT, requestedValue: 5000, reason: "Reduce first-period amount" },
       staff
     );
 
@@ -401,6 +435,60 @@ describe("Corrective Phase 2 — canonical effective payments and corrections", 
     assert.notEqual(saved.status, CORRECTION_STATUS.PENDING);
   });
 
+  it("concurrent correction requests keep exactly one pending request and unique versions", async () => {
+    const admin = await createAdmin();
+    const staff = await createStaff();
+    const { customer, scheme } = await seedCustomerScheme(admin);
+    const paymentResult = await pay(customer, scheme, staff, 5100);
+
+    const [first, second] = await Promise.allSettled([
+      createCorrectionRequest(
+        paymentResult.payment._id,
+        { correctionType: CORRECTION_TYPES.EDIT_NOTES, requestedValue: "First", reason: "First request" },
+        staff
+      ),
+      createCorrectionRequest(
+        paymentResult.payment._id,
+        { correctionType: CORRECTION_TYPES.EDIT_NOTES, requestedValue: "Second", reason: "Second request" },
+        staff
+      ),
+    ]);
+
+    const fulfilled = [first, second].filter((result) => result.status === "fulfilled");
+    const rejected = [first, second].filter((result) => result.status === "rejected");
+    assert.equal(fulfilled.length, 1);
+    assert.equal(rejected.length, 1);
+    assert.equal(rejected[0].reason.code, ERROR_CODES.PENDING_CORRECTION_EXISTS);
+
+    await approveCorrection(
+      fulfilled[0].value._id,
+      { reviewClientRequestId: reqId(), reviewNotes: "approve" },
+      admin
+    );
+
+    const nextCorrection = await createCorrectionRequest(
+      paymentResult.payment._id,
+      { correctionType: CORRECTION_TYPES.EDIT_REFERENCE, requestedValue: "UPI-REF-900", reason: "Reference update" },
+      staff
+    );
+    await approveCorrection(
+      nextCorrection._id,
+      { reviewClientRequestId: reqId(), reviewNotes: "approve" },
+      admin
+    );
+
+    const approved = await PaymentCorrection.find({
+      payment: paymentResult.payment._id,
+      status: CORRECTION_STATUS.APPROVED,
+    })
+      .sort({ version: 1 })
+      .lean();
+    assert.deepEqual(
+      approved.map((row) => row.version),
+      [1, 2]
+    );
+  });
+
   it("method correction posts balanced non-self journal entries", async () => {
     const admin = await createAdmin();
     const staff = await createStaff();
@@ -463,6 +551,88 @@ describe("Corrective Phase 2 — canonical effective payments and corrections", 
         admin
       ),
       (error) => error.code === ERROR_CODES.CORRECTION_ALREADY_REVIEWED
+    );
+  });
+
+  it("direct reversal uses latest effective amount and method", async () => {
+    const admin = await createAdmin();
+    const staff = await createStaff();
+    const { customer, scheme } = await seedCustomerScheme(admin);
+    const paymentResult = await pay(customer, scheme, staff, 3000, PAYMENT_METHODS.CASH);
+
+    const amountCorrection = await createCorrectionRequest(
+      paymentResult.payment._id,
+      { correctionType: CORRECTION_TYPES.EDIT_AMOUNT, requestedValue: 2500, reason: "Amount correction" },
+      staff
+    );
+    await approveCorrection(
+      amountCorrection._id,
+      { reviewClientRequestId: reqId(), reviewNotes: "ok" },
+      admin
+    );
+
+    const refCorrection = await createCorrectionRequest(
+      paymentResult.payment._id,
+      { correctionType: CORRECTION_TYPES.EDIT_REFERENCE, requestedValue: "UPI-CP3-1", reason: "Add reference" },
+      staff
+    );
+    await approveCorrection(
+      refCorrection._id,
+      { reviewClientRequestId: reqId(), reviewNotes: "ok" },
+      admin
+    );
+
+    const methodCorrection = await createCorrectionRequest(
+      paymentResult.payment._id,
+      { correctionType: CORRECTION_TYPES.EDIT_METHOD, requestedValue: PAYMENT_METHODS.UPI, reason: "Switch method" },
+      staff
+    );
+    await approveCorrection(
+      methodCorrection._id,
+      { reviewClientRequestId: reqId(), reviewNotes: "ok" },
+      admin
+    );
+
+    await reversePayment(
+      paymentResult.payment._id,
+      { reason: "Admin reversal", clientRequestId: reqId() },
+      admin
+    );
+
+    const reversalEntry = await FinancialJournal.findOne({
+      sourceRecordType: "Payment",
+      sourceRecordId: paymentResult.payment._id,
+      eventType: JOURNAL_EVENT_TYPES.COLLECTION_REVERSAL,
+    }).lean();
+    assert.ok(reversalEntry);
+    assert.equal(reversalEntry.amount, 2500);
+    assert.equal(reversalEntry.metadata.paymentMethod, PAYMENT_METHODS.UPI);
+  });
+
+  it("direct reversal is blocked after settlement with no override path", async () => {
+    const admin = await createAdmin();
+    const staff = await createStaff();
+    const { customer, scheme } = await seedCustomerScheme(admin);
+    const paymentResult = await pay(customer, scheme, staff, 4000, PAYMENT_METHODS.CASH);
+
+    await updateSchemeStatus(
+      scheme._id,
+      {
+        status: SCHEME_STATUS.REDEEMED,
+        notes: "Settled",
+        clientRequestId: reqId(),
+        payoutMethod: PAYMENT_METHODS.CASH,
+      },
+      admin
+    );
+
+    await assert.rejects(
+      reversePayment(
+        paymentResult.payment._id,
+        { reason: "Too late", clientRequestId: reqId() },
+        admin
+      ),
+      (error) => error.code === ERROR_CODES.SCHEME_ALREADY_SETTLED
     );
   });
 });

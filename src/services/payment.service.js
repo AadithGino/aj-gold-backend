@@ -119,9 +119,6 @@ const mapPayment = (payment, effectiveMeta = null) => {
     paymentDate: payment.paymentDate,
     receiptNumber: payment.receiptNumber,
     status: payment.status,
-    isLimitOverride: Boolean(payment.isLimitOverride),
-    overrideReason: payment.overrideReason || "",
-    overrideBy: payment.overrideBy,
     notes: payment.notes || "",
     createdAt: payment.createdAt,
     updatedAt: payment.updatedAt,
@@ -526,7 +523,16 @@ const reversePayment = async (paymentId, payload, actor) => {
       { session }
     );
 
-    const { entries } = await loadSchemeLedgerContext(scheme._id, session);
+    const { entries, latestByPayment } = await loadSchemeLedgerContext(scheme._id, session);
+    const latestCorrection = latestByPayment.get(String(payment._id)) || null;
+    const currentLedger = getEffectiveLedgerFields(payment, latestCorrection);
+    if (!currentLedger) {
+      throw new ApiError(409, "Payment is already effectively reversed.", [], {
+        code: ERROR_CODES.PAYMENT_ALREADY_REVERSED,
+        retryable: false,
+      });
+    }
+
     const proposedEntries = entries.filter(
       (entry) => String(entry.paymentId) !== String(payment._id)
     );
@@ -548,11 +554,11 @@ const reversePayment = async (paymentId, payload, actor) => {
     }
 
     if (
-      payment.paymentMethod === PAYMENT_METHODS.CASH &&
+      currentLedger.paymentMethod === PAYMENT_METHODS.CASH &&
       payment.collectedByRole === USER_ROLES.STAFF
     ) {
       await lockStaffCashProfile(payment.collectedBy, session);
-      await assertStaffCashInHandSufficient(payment.collectedBy, payment.amount, session);
+      await assertStaffCashInHandSufficient(payment.collectedBy, currentLedger.amount, session);
     }
 
     const previousStatus = payment.status;
@@ -565,6 +571,8 @@ const reversePayment = async (paymentId, payload, actor) => {
         payment,
         actor,
         clientRequestId: payload.clientRequestId,
+        effectiveAmount: currentLedger.amount,
+        effectiveMethod: currentLedger.paymentMethod,
       },
       session
     );
@@ -580,6 +588,8 @@ const reversePayment = async (paymentId, payload, actor) => {
         status: PAYMENT_STATUS.REVERSED,
         reason,
         notes: payment.notes,
+        effectiveAmount: currentLedger.amount,
+        effectivePaymentMethod: currentLedger.paymentMethod,
         clientRequestId: payload.clientRequestId,
       },
       notes: `Payment reversed: ${reason}`,
@@ -613,10 +623,10 @@ const reversePayment = async (paymentId, payload, actor) => {
             recipient: customer.user,
             type: NOTIFICATION_TYPES.PAYMENT_REVERSED,
             title: "Payment Reversed",
-            message: `Your payment of ₹${payment.amount.toLocaleString("en-IN")} (${payment.receiptNumber}) has been reversed. Please contact your AJ Gold advisor for details.`,
+            message: `Your payment of ₹${currentLedger.amount.toLocaleString("en-IN")} (${payment.receiptNumber}) has been reversed. Please contact your AJ Gold advisor for details.`,
             data: {
               paymentId: payment._id,
-              amount: payment.amount,
+              amount: currentLedger.amount,
               receiptNumber: payment.receiptNumber,
             },
           },

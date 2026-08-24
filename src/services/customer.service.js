@@ -551,8 +551,6 @@ const getCustomerDetail = async (customerId, actor = null) => {
         collectedByRole: payment.collectedByRole,
         transactionReference: payment.transactionReference || null,
         notes: payment.notes || null,
-        isLimitOverride: payment.isLimitOverride || false,
-        overrideReason: payment.overrideReason || null,
         sourceAmount: payment.amount,
         effectiveAmount: effectiveMeta.effectiveAmount,
       };

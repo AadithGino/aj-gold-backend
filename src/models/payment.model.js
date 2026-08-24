@@ -27,9 +27,6 @@ const paymentSchema = new mongoose.Schema(
       default: PAYMENT_STATUS.SUCCESS,
       index: true,
     },
-    isLimitOverride: { type: Boolean, default: false },
-    overrideReason: String,
-    overrideBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
     notes: String,
   },
   { timestamps: true }
