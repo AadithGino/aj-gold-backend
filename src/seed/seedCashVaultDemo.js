@@ -9,7 +9,7 @@ require("dotenv").config();
 
 const bcrypt = require("bcryptjs");
 const mongoose = require("mongoose");
-const { connectDb } = require("../config/db");
+const { connectDb, CONNECTION_SCHEMA_MODE } = require("../config/db");
 const { assertDestructiveOperationAllowed } = require("../ops/destructiveGuard");
 const User = require("../models/user.model");
 const Customer = require("../models/customer.model");
@@ -315,7 +315,7 @@ const run = async () => {
 
   log("\nAJ Gold — Cash Vault Demo Seed\n");
 
-  await connectDb(mongoUri);
+  await connectDb({ uri: mongoUri, schemaMode: CONNECTION_SCHEMA_MODE.RUNTIME });
   await clearDatabase();
   const admin = await ensureAdmin();
 

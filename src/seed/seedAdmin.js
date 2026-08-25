@@ -1,7 +1,7 @@
 require("dotenv").config();
 const mongoose = require("mongoose");
 const bcrypt = require("bcryptjs");
-const { connectDb } = require("../config/db");
+const { connectDb, CONNECTION_SCHEMA_MODE } = require("../config/db");
 const User = require("../models/user.model");
 const { USER_ROLES, USER_STATUS } = require("../constants/enums");
 const { NODE_ENV, SEED_ALLOW_PRODUCTION } = require("../config/env");
@@ -27,7 +27,10 @@ const seed = async () => {
     throw new Error("DEFAULT_ADMIN_PASSWORD must be at least 8 characters.");
   }
 
-  await connectDb(process.env.MONGO_URI);
+  await connectDb({
+    uri: process.env.MONGO_URI,
+    schemaMode: CONNECTION_SCHEMA_MODE.RUNTIME,
+  });
 
   const existing = await User.findOne({ phone }).select("+passwordHash");
 

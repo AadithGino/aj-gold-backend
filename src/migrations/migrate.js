@@ -1,7 +1,7 @@
 const mongoose = require("mongoose");
 process.env.AJ_MIGRATION_CLI = "1";
 const env = require("../config/env");
-const { connectDb } = require("../config/db");
+const { connectDb, CONNECTION_SCHEMA_MODE } = require("../config/db");
 const { runMigrations } = require("./runMigrations");
 const { verifyRequiredIndexes } = require("../ops/requiredIndexes");
 
@@ -12,7 +12,7 @@ const main = async () => {
     throw new Error("MONGO_URI is required.");
   }
 
-  await connectDb(env.mongoUri);
+  await connectDb({ uri: env.mongoUri, schemaMode: CONNECTION_SCHEMA_MODE.RUNTIME });
   const db = mongoose.connection.db;
 
   const report = await runMigrations(db, { dryRun, verifyOnly });

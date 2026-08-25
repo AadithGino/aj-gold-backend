@@ -3,7 +3,7 @@ require("dotenv").config();
 const { execSync } = require("node:child_process");
 const path = require("node:path");
 const mongoose = require("mongoose");
-const { connectDb } = require("../config/db");
+const { connectDb, CONNECTION_SCHEMA_MODE } = require("../config/db");
 const { assertDestructiveOperationAllowed } = require("../ops/destructiveGuard");
 const { runMigrations } = require("../migrations/runMigrations");
 const { verifyRequiredIndexes } = require("../ops/requiredIndexes");
@@ -17,7 +17,7 @@ const run = async () => {
 
   console.log(`Resetting demo database: ${dbName}`);
 
-  await connectDb(mongoUri);
+  await connectDb({ uri: mongoUri, schemaMode: CONNECTION_SCHEMA_MODE.RUNTIME });
   await mongoose.connection.dropDatabase();
   console.log("✓ Database dropped");
 

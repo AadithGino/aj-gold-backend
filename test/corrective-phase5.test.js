@@ -51,6 +51,31 @@ const { SCHEME_STATUS, PAYMENT_STATUS } = require("../src/constants/enums");
 const { verifyRequiredIndexes } = require("../src/ops/requiredIndexes");
 
 const reqId = () => crypto.randomUUID();
+const TEST_ROOT = path.join(__dirname, "..");
+const DDL_METHODS = new Set([
+  "createCollection",
+  "createIndex",
+  "createIndexes",
+  "ensureIndexes",
+  "dropIndex",
+  "dropIndexes",
+  "collMod",
+]);
+
+const runNodeProbe = (script, env) =>
+  spawnSync(process.execPath, ["-e", script], {
+    cwd: TEST_ROOT,
+    env: { ...process.env, ...env },
+    encoding: "utf8",
+    timeout: 120000,
+    killSignal: "SIGKILL",
+  });
+
+const parseDebugEvents = (output) =>
+  output
+    .split("\n")
+    .filter((line) => line.startsWith("MDBG "))
+    .map((line) => JSON.parse(line.slice(5)));
 
 let replSet;
 
@@ -141,97 +166,182 @@ describe("Corrective Phase 5 — migrations, outbox, backups, packaging", () => 
     assert.deepEqual(applied, migrationIds);
   });
 
-  it("schema readiness completes catalog work before first customer write", async () => {
+  it("runtime mode in production issues zero DDL and passes preflight on migrated database", async () => {
     const db = mongoose.connection.db;
     await verifyRequiredIndexes(db);
-    await User.create({
-      name: "Admin",
-      phone: `91${Date.now().toString().slice(-8)}`,
-      passwordHash: await bcrypt.hash("admin12345", 10),
-      role: "ADMIN",
-      status: "ACTIVE",
-    });
+    const prodDbName = `ajgoldphase5runtime${Date.now()}`;
+    const prodUri = replSet.getUri(prodDbName);
+    const seededConn = await mongoose.createConnection(prodUri).asPromise();
+    await runMigrations(seededConn.db);
+    await seededConn.close();
 
-    const runCustomerCreate = (suffix) =>
-      spawnSync(
-        process.execPath,
-        [
-          "-e",
-          `
-            const mongoose = require("mongoose");
-            const { connectDb } = require("./src/config/db");
-            const User = require("./src/models/user.model");
-            const { createCustomer } = require("./src/services/customer.service");
+    const runtimeProbe = runNodeProbe(
+      `
+        const mongoose = require("mongoose");
+        const { connectDb, CONNECTION_SCHEMA_MODE } = require("./src/config/db");
+        const { runStartupPreflight } = require("./src/ops/preflight");
+        mongoose.set("debug", (collectionName, method) => {
+          console.log("MDBG " + JSON.stringify({ collectionName, method }));
+        });
+        (async () => {
+          await connectDb({ uri: process.env.MONGO_URI, schemaMode: CONNECTION_SCHEMA_MODE.RUNTIME });
+          await runStartupPreflight({ requireMigrations: true });
+          await mongoose.disconnect();
+        })().catch(async (error) => {
+          console.error(error.stack || error.message);
+          if (mongoose.connection.readyState !== 0) await mongoose.disconnect();
+          process.exit(1);
+        });
+      `,
+      {
+        NODE_ENV: "production",
+        MONGO_URI: prodUri,
+        JWT_SECRET: "01234567890123456789012345678901",
+        CORS_ORIGINS: "https://example.com",
+      }
+    );
 
-            const events = [];
-            mongoose.set("debug", (collectionName, method) => {
-              events.push({ collectionName, method });
-              console.log("MDBG " + JSON.stringify({ collectionName, method }));
-            });
+    assert.equal(runtimeProbe.status, 0, runtimeProbe.stderr || runtimeProbe.stdout);
+    const events = parseDebugEvents(runtimeProbe.stdout);
+    const ddlEvents = events.filter((event) => DDL_METHODS.has(event.method));
+    assert.equal(ddlEvents.length, 0, `Runtime mode emitted DDL: ${JSON.stringify(ddlEvents)}`);
+  });
 
-            (async () => {
-              await connectDb(process.env.MONGO_URI);
-              const admin = await User.findOne({ role: "ADMIN" });
-              await createCustomer(
-                {
-                  name: "Readiness Customer ${suffix}",
-                  phone: "8${Date.now().toString().slice(-8)}${suffix}",
-                },
-                admin
-              );
-              await mongoose.connection.close();
-            })().catch(async (error) => {
-              console.error(error.stack || error.message);
-              if (mongoose.connection.readyState !== 0) {
-                await mongoose.connection.close();
-              }
-              process.exit(1);
-            });
-          `,
-        ],
-        {
-          cwd: path.join(__dirname, ".."),
-          env: {
-            ...process.env,
-            NODE_ENV: "test",
-            MONGO_URI: replSet.getUri(mongoose.connection.name),
-          },
-          encoding: "utf8",
-        }
-      );
+  it("runtime mode fails closed for missing schema/indexes without DDL repair", async () => {
+    const missingUri = replSet.getUri(`ajgoldphase5missing${Date.now()}`);
+    const runtimeProbe = runNodeProbe(
+      `
+        const mongoose = require("mongoose");
+        const { connectDb, CONNECTION_SCHEMA_MODE } = require("./src/config/db");
+        const { runStartupPreflight } = require("./src/ops/preflight");
+        mongoose.set("debug", (collectionName, method) => {
+          console.log("MDBG " + JSON.stringify({ collectionName, method }));
+        });
+        (async () => {
+          await connectDb({ uri: process.env.MONGO_URI, schemaMode: CONNECTION_SCHEMA_MODE.RUNTIME });
+          await runStartupPreflight({ requireMigrations: true });
+          await mongoose.disconnect();
+          process.exit(0);
+        })().catch(async (error) => {
+          console.error("EXPECTED_FAIL " + (error.message || error));
+          if (mongoose.connection.readyState !== 0) await mongoose.disconnect();
+          process.exit(2);
+        });
+      `,
+      {
+        NODE_ENV: "production",
+        MONGO_URI: missingUri,
+        JWT_SECRET: "01234567890123456789012345678901",
+        CORS_ORIGINS: "https://example.com",
+      }
+    );
 
-    const firstRun = runCustomerCreate("1");
-    assert.equal(firstRun.status, 0, firstRun.stderr || firstRun.stdout);
-    const firstEvents = firstRun.stdout
-      .split("\n")
-      .filter((line) => line.startsWith("MDBG "))
-      .map((line) => JSON.parse(line.slice(5)));
+    assert.equal(runtimeProbe.status, 2, runtimeProbe.stderr || runtimeProbe.stdout);
+    assert.match(runtimeProbe.stderr + runtimeProbe.stdout, /EXPECTED_FAIL/i);
+    const events = parseDebugEvents(runtimeProbe.stdout);
+    const ddlEvents = events.filter((event) => DDL_METHODS.has(event.method));
+    assert.equal(ddlEvents.length, 0, `Runtime mode attempted DDL repair: ${JSON.stringify(ddlEvents)}`);
+  });
 
-    const firstCustomerInsertIndex = firstEvents.findIndex(
+  it("disposable-bootstrap mode rejects unsafe targets and awaits DDL before first write", async () => {
+    const unsafeProbe = runNodeProbe(
+      `
+        const mongoose = require("mongoose");
+        const { connectDb, CONNECTION_SCHEMA_MODE } = require("./src/config/db");
+        (async () => {
+          await connectDb({ uri: process.env.MONGO_URI, schemaMode: CONNECTION_SCHEMA_MODE.DISPOSABLE_BOOTSTRAP });
+          await mongoose.disconnect();
+          process.exit(0);
+        })().catch(async (error) => {
+          console.error("EXPECTED_UNSAFE " + (error.message || error));
+          if (mongoose.connection.readyState !== 0) await mongoose.disconnect();
+          process.exit(3);
+        });
+      `,
+      {
+        NODE_ENV: "test",
+        MONGO_URI: replSet.getUri(`ajgoldphase5unsafe${Date.now()}`),
+      }
+    );
+    assert.equal(unsafeProbe.status, 3, unsafeProbe.stderr || unsafeProbe.stdout);
+    assert.match(unsafeProbe.stderr + unsafeProbe.stdout, /EXPECTED_UNSAFE/i);
+
+    const safeDbName = `ajgold_phase5_bootstrap_${Date.now()}_test`;
+    const bootstrapProbe = runNodeProbe(
+      `
+        const mongoose = require("mongoose");
+        const { connectDb, CONNECTION_SCHEMA_MODE } = require("./src/config/db");
+        const Customer = require("./src/models/customer.model");
+        mongoose.set("debug", (collectionName, method) => {
+          console.log("MDBG " + JSON.stringify({ collectionName, method }));
+        });
+        (async () => {
+          await connectDb({ uri: process.env.MONGO_URI, schemaMode: CONNECTION_SCHEMA_MODE.DISPOSABLE_BOOTSTRAP });
+          await Customer.create({
+            passbookNumber: "9001",
+            name: "Bootstrap Customer",
+            phone: "8" + String(Date.now()).slice(-9),
+            status: "ACTIVE",
+            legalHold: false,
+          });
+          await mongoose.disconnect();
+        })().catch(async (error) => {
+          console.error(error.stack || error.message);
+          if (mongoose.connection.readyState !== 0) await mongoose.disconnect();
+          process.exit(1);
+        });
+      `,
+      {
+        NODE_ENV: "test",
+        MONGO_URI: replSet.getUri(safeDbName),
+      }
+    );
+    assert.equal(bootstrapProbe.status, 0, bootstrapProbe.stderr || bootstrapProbe.stdout);
+    const events = parseDebugEvents(bootstrapProbe.stdout);
+    const firstCustomerInsertIndex = events.findIndex(
       (event) => event.collectionName === "customers" && event.method === "insertOne"
     );
-    assert.ok(firstCustomerInsertIndex >= 0, "Expected first customer insert");
-
-    const catalogMethods = new Set([
-      "createCollection",
-      "createIndex",
-      "createIndexes",
-      "ensureIndexes",
-      "dropIndex",
-      "dropIndexes",
-      "collMod",
-    ]);
-    const postInsertCatalogOps = firstEvents
+    assert.ok(firstCustomerInsertIndex >= 0, "Expected first customer insert in bootstrap mode");
+    const postInsertDDL = events
       .slice(firstCustomerInsertIndex + 1)
-      .filter((event) => catalogMethods.has(event.method));
-    assert.equal(
-      postInsertCatalogOps.length,
-      0,
-      `Catalog operations after first customer insert: ${JSON.stringify(postInsertCatalogOps)}`
-    );
+      .filter((event) => DDL_METHODS.has(event.method));
+    assert.equal(postInsertDDL.length, 0, `DDL after first write: ${JSON.stringify(postInsertDDL)}`);
+  });
 
-    const secondRun = runCustomerCreate("2");
-    assert.equal(secondRun.status, 0, secondRun.stderr || secondRun.stdout);
+  it("already-migrated disposable database connects in runtime mode and first write succeeds", async () => {
+    const dbName = `ajgold_phase5_runtime_${Date.now()}_test`;
+    const runtimeUri = replSet.getUri(dbName);
+    const seededConn = await mongoose.createConnection(runtimeUri).asPromise();
+    await runMigrations(seededConn.db);
+    await seededConn.close();
+
+    const runtimeProbe = runNodeProbe(
+      `
+        const mongoose = require("mongoose");
+        const { connectDb, CONNECTION_SCHEMA_MODE } = require("./src/config/db");
+        const Customer = require("./src/models/customer.model");
+        (async () => {
+          await connectDb({ uri: process.env.MONGO_URI, schemaMode: CONNECTION_SCHEMA_MODE.RUNTIME });
+          await Customer.create({
+            passbookNumber: "9002",
+            name: "Runtime Customer",
+            phone: "7" + String(Date.now()).slice(-9),
+            status: "ACTIVE",
+            legalHold: false,
+          });
+          await mongoose.disconnect();
+        })().catch(async (error) => {
+          console.error(error.stack || error.message);
+          if (mongoose.connection.readyState !== 0) await mongoose.disconnect();
+          process.exit(1);
+        });
+      `,
+      {
+        NODE_ENV: "test",
+        MONGO_URI: runtimeUri,
+      }
+    );
+    assert.equal(runtimeProbe.status, 0, runtimeProbe.stderr || runtimeProbe.stdout);
   });
 
   it("migration 002 safe runner processes representative records beyond one batch", async () => {

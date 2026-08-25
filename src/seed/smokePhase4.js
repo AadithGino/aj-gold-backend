@@ -7,7 +7,7 @@ const bcrypt = require("bcryptjs");
 const mongoose = require("mongoose");
 const app = require("../app");
 const env = require("../config/env");
-const { connectDb } = require("../config/db");
+const { connectDb, CONNECTION_SCHEMA_MODE } = require("../config/db");
 const User = require("../models/user.model");
 const Customer = require("../models/customer.model");
 const Scheme = require("../models/scheme.model");
@@ -70,7 +70,7 @@ const run = async () => {
     throw new Error("MONGO_URI and JWT_SECRET are required.");
   }
 
-  await connectDb(env.mongoUri);
+  await connectDb({ uri: env.mongoUri, schemaMode: CONNECTION_SCHEMA_MODE.RUNTIME });
   const admin = await User.findOne({ role: USER_ROLES.ADMIN });
   assert(Boolean(admin), "Admin user exists");
 

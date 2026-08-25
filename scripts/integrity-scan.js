@@ -2,7 +2,7 @@
 require("dotenv").config();
 
 const mongoose = require("mongoose");
-const { connectDb } = require("../src/config/db");
+const { connectDb, CONNECTION_SCHEMA_MODE } = require("../src/config/db");
 const { scanIntegrity } = require("../src/ops/integrityScanner");
 
 const main = async () => {
@@ -10,7 +10,10 @@ const main = async () => {
     throw new Error("MONGO_URI is required.");
   }
 
-  await connectDb(process.env.MONGO_URI);
+  await connectDb({
+    uri: process.env.MONGO_URI,
+    schemaMode: CONNECTION_SCHEMA_MODE.RUNTIME,
+  });
   const report = await scanIntegrity({ db: mongoose.connection.db });
   console.log(JSON.stringify(report, null, 2));
   await mongoose.disconnect();
