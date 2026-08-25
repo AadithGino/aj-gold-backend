@@ -69,11 +69,16 @@ const createCustomerHandler = asyncHandler(async (req, res) => {
 });
 
 const listCustomersHandler = asyncHandler(async (req, res) => {
-  const items = await searchCustomers(req.query.search || "", req.user);
+  const result = await searchCustomers(req.query.search || "", req.user, {
+    paginated: true,
+    cursor: req.query.cursor,
+    limit: req.query.limit,
+  });
 
   return res.status(200).json({
     success: true,
-    data: { items },
+    data: { items: result.items },
+    pageInfo: result.pageInfo,
   });
 });
 

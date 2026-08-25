@@ -8,7 +8,6 @@ const {
   USER_ROLES,
   USER_STATUS,
   SCHEME_STATUS,
-  PAYMENT_STATUS,
   AUDIT_ACTIONS,
 } = require("../constants/enums");
 const ApiError = require("../utils/ApiError");
@@ -31,7 +30,10 @@ const {
 const {
   enrichPaymentsWithEffectiveView,
   applyEffectivePaymentRow,
+  loadEffectivePaymentContext,
 } = require("../utils/effectiveReadModel");
+const { parseSafeSearchTerm } = require("../utils/safeSearch");
+const { parseCursorPagination, buildCursorPage } = require("../utils/pagination");
 
 const getId = (value) => (value && typeof value === "object" ? value._id || null : value || null);
 
@@ -434,20 +436,64 @@ const resetCustomerPassword = async (customerId, newPassword, actor) => {
   };
 };
 
-const searchCustomers = async (search = "", actor = null) => {
+const searchCustomers = async (search = "", actor = null, options = {}) => {
   const accessMode = await assertCustomerSearchAccess(actor, search);
-  const trimmed = search.trim();
-  let customers = [];
+  const { paginated = false } = options;
+  const term = parseSafeSearchTerm(search, { label: "search" });
+  const query = {};
+  if (term) {
+    const regex = new RegExp(term, "i");
+    query.$or = [{ name: regex }, { phone: regex }, { passbookNumber: regex }];
+  }
 
-  if (!trimmed) {
-    customers = await Customer.find().sort({ createdAt: -1 }).limit(100);
+  let customers = [];
+  let pageInfo = undefined;
+  if (paginated) {
+    const { limit, cursor } = parseCursorPagination(options, {
+      maxLimit: 100,
+      defaultLimit: 50,
+    });
+    const scopeToken = JSON.stringify({
+      actorRole: actor?.role || null,
+      actorId: actor?._id ? String(actor._id) : null,
+      accessMode,
+      term: term || null,
+    });
+
+    if (cursor) {
+      if (
+        typeof cursor !== "object" ||
+        !cursor.createdAt ||
+        !cursor._id ||
+        cursor.scope !== scopeToken
+      ) {
+        throw new ApiError(400, "Invalid cursor.");
+      }
+      query.$and = query.$and || [];
+      query.$and.push({
+        $or: [
+          { createdAt: { $lt: new Date(cursor.createdAt) } },
+          { createdAt: new Date(cursor.createdAt), _id: { $lt: cursor._id } },
+        ],
+      });
+    }
+
+    const pageRows = await Customer.find(query)
+      .sort({ createdAt: -1, _id: -1 })
+      .limit(limit + 1);
+    customers = pageRows.slice(0, limit);
+    pageInfo = buildCursorPage(pageRows, {
+      limit,
+      getCursorValue: (row) => ({
+        createdAt: row.createdAt,
+        _id: row._id,
+        scope: scopeToken,
+      }),
+    }).pageInfo;
+  } else if (!term) {
+    customers = await Customer.find(query).sort({ createdAt: -1 }).limit(100);
   } else {
-    const regex = new RegExp(trimmed.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
-    customers = await Customer.find({
-      $or: [{ name: regex }, { phone: regex }, { passbookNumber: regex }],
-    })
-      .sort({ createdAt: -1 })
-      .limit(100);
+    customers = await Customer.find(query).sort({ createdAt: -1 }).limit(100);
   }
 
   const customerIds = customers.map((customer) => customer._id);
@@ -462,6 +508,20 @@ const searchCustomers = async (search = "", actor = null) => {
     schemesByCustomer.get(key).push(scheme);
   });
 
+  const activeSchemeIds = schemes
+    .filter((scheme) => scheme.status === SCHEME_STATUS.ACTIVE)
+    .map((scheme) => scheme._id);
+  const effectiveEntriesByScheme = new Map();
+  if (activeSchemeIds.length) {
+    const effectiveContext = await loadEffectivePaymentContext({
+      scheme: { $in: activeSchemeIds },
+    });
+    for (const { payment } of effectiveContext.entries) {
+      const key = String(payment.scheme);
+      effectiveEntriesByScheme.set(key, (effectiveEntriesByScheme.get(key) || 0) + 1);
+    }
+  }
+
   const items = await Promise.all(
     customers.map(async (customer) => {
       const customerSchemes = schemesByCustomer.get(customer._id.toString()) || [];
@@ -470,10 +530,7 @@ const searchCustomers = async (search = "", actor = null) => {
 
       if (activeSchemeDoc) {
         activeScheme = await enrichScheme(activeSchemeDoc);
-        const paymentCount = await Payment.countDocuments({
-          scheme: activeSchemeDoc._id,
-          status: PAYMENT_STATUS.SUCCESS,
-        });
+        const paymentCount = effectiveEntriesByScheme.get(String(activeSchemeDoc._id)) || 0;
         const now = new Date();
         const inFirstSixMonths = isInFirstPeriod(activeSchemeDoc, now);
         activeScheme = {
@@ -502,10 +559,18 @@ const searchCustomers = async (search = "", actor = null) => {
     })
   );
 
+  if (paginated) {
+    return {
+      items,
+      pageInfo,
+    };
+  }
+
   return items;
 };
 
-const getCustomerDetail = async (customerId, actor = null) => {
+const getCustomerDetail = async (customerId, actor = null, options = {}) => {
+  const { forceFull = false } = options;
   const accessMode = await getCustomerAccessMode(actor);
   const customer = await Customer.findById(customerId)
     .populate("createdBy", "name role")
@@ -563,7 +628,7 @@ const getCustomerDetail = async (customerId, actor = null) => {
     scheme: payment.scheme,
   }));
 
-  if (accessMode === "collection") {
+  if (accessMode === "collection" && !forceFull) {
     return {
       customer: sanitizeCollectionCustomer(customer),
       activeScheme: grouped.active

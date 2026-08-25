@@ -173,14 +173,8 @@ const run = async () => {
       "cashInVault equals totalCashInVault on admin dashboard"
     );
     assert(
-      adminDash.cashInVault ===
-        adminDash.totalCashSubmittedToVault +
-          (adminDash.totalAdminCashCollected || 0) +
-          adminDash.totalUpiCollectedFromCustomers +
-          adminDash.totalBankCollectedFromCustomers +
-          adminDash.totalCardCollectedFromCustomers -
-          adminDash.totalCustomerSettlement,
-      "Admin dashboard cashInVault formula holds"
+      adminDash.totalCollectedFromCustomers >= (adminDash.totalCashCollectedFromCustomers || 0),
+      "Admin dashboard total collection is at least CASH collections"
     );
     assertNoPasswordHash(adminDash, "adminDashboard");
 

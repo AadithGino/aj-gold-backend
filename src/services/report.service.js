@@ -15,8 +15,6 @@ const {
 const ApiError = require("../utils/ApiError");
 const { parseDateRange, startOfDay, endOfDay } = require("../utils/date");
 const dayjs = require("dayjs");
-const { getPaymentMethodBreakdown } = require("./cash.service");
-const { getStaffCashInHand } = require("./staffCash.service");
 const { getCashPositionSummary } = require("./cashPosition.service");
 const { enrichScheme, getCustomerDetail, getCustomerOrThrow } = require("./customer.service");
 const { getSchemeLimitSummariesBatch } = require("./paymentLimit.service");
@@ -26,6 +24,7 @@ const {
   enrichPaymentsWithEffectiveView,
   applyEffectivePaymentRow,
   loadEffectivePaymentContext,
+  filterEffectiveEntries,
 } = require("../utils/effectiveReadModel");
 
 const mapSettlementEntry = (scheme, event, index = 0) => ({
@@ -88,6 +87,43 @@ const mapCollectionPayment = (payment, effectiveMeta = null) => ({
     : {}),
 });
 
+const PAGE_SCAN_MULTIPLIER = 3;
+const MAX_PAGE_SCAN_BATCHES = 40;
+
+const buildCollectionScopeToken = ({ actor, query, statusFilter, effectiveFilters }) =>
+  JSON.stringify({
+    actorRole: actor?.role || null,
+    actorId: actor?._id ? String(actor._id) : null,
+    customer: query.customer ? String(query.customer) : null,
+    scheme: query.scheme ? String(query.scheme) : null,
+    collectedBy: query.collectedBy ? String(query.collectedBy) : null,
+    status: statusFilter || null,
+    method: effectiveFilters.paymentMethod || null,
+    from: effectiveFilters.paymentDate?.$gte
+      ? new Date(effectiveFilters.paymentDate.$gte).toISOString()
+      : null,
+    to: effectiveFilters.paymentDate?.$lte
+      ? new Date(effectiveFilters.paymentDate.$lte).toISOString()
+      : null,
+  });
+
+const assertCollectionCursor = (decodedCursor, scopeToken) => {
+  if (!decodedCursor) return null;
+  if (
+    typeof decodedCursor !== "object" ||
+    !decodedCursor._id ||
+    typeof decodedCursor.scope !== "string"
+  ) {
+    throw new ApiError(400, "Invalid cursor.");
+  }
+  if (decodedCursor.scope !== scopeToken) {
+    throw new ApiError(400, "Cursor does not match the current scope.");
+  }
+  return {
+    _id: decodedCursor._id,
+  };
+};
+
 const buildBasePaymentQuery = (filters = {}) => {
   const query = {};
 
@@ -134,65 +170,38 @@ const getCollectionReport = async (filters = {}, actor) => {
     effectiveFilters.paymentDate = query.paymentDate;
   }
 
-  const listQuery = { ...query };
-  if (decodedCursor?.paymentDate && decodedCursor?.createdAt && decodedCursor?._id) {
-    listQuery.$or = [
-      { paymentDate: { $lt: new Date(decodedCursor.paymentDate) } },
-      {
-        paymentDate: new Date(decodedCursor.paymentDate),
-        createdAt: { $lt: new Date(decodedCursor.createdAt) },
-      },
-      {
-        paymentDate: new Date(decodedCursor.paymentDate),
-        createdAt: new Date(decodedCursor.createdAt),
-        _id: { $lt: decodedCursor._id },
-      },
-    ];
-  }
-
-  const [successBreakdown, paymentRows, effectiveContext, rawReversedCount] = await Promise.all([
-    getPaymentMethodBreakdown({ ...query, status: PAYMENT_STATUS.SUCCESS }),
-    Payment.find(listQuery)
-      .populate("customer", "name passbookNumber phone")
-      .populate("scheme", "enrollmentNumber schemeName status")
-      .populate("collectedBy", "name role")
-      .sort({ paymentDate: -1, createdAt: -1, _id: -1 })
-      .limit(limit + 1)
-      .lean(),
-    loadEffectivePaymentContext(query),
-    Payment.countDocuments({ ...query, status: PAYMENT_STATUS.REVERSED }),
-  ]);
-
-  const enriched = await enrichPaymentsWithEffectiveView(paymentRows);
-  const mappedPayments = enriched
-    .filter(({ view }) => {
-      if (statusFilter === PAYMENT_STATUS.REVERSED) {
-        return !view.effectiveLedger;
-      }
-      if (statusFilter === PAYMENT_STATUS.SUCCESS) {
-        return Boolean(view.effectiveLedger);
-      }
-      return true;
-    })
-    .map(({ payment, latest }) =>
-      mapCollectionPayment(payment, applyEffectivePaymentRow(payment, latest))
-    );
-
-  const paymentPage = buildCursorPage(mappedPayments, {
-    limit,
-    getCursorValue: (row) => ({
-      paymentDate: row.paymentDate,
-      createdAt: row.createdAt || row.paymentDate,
-      _id: row._id,
-    }),
+  const scopeToken = buildCollectionScopeToken({
+    actor,
+    query,
+    statusFilter,
+    effectiveFilters,
   });
+  let cursorState = assertCollectionCursor(decodedCursor, scopeToken);
 
-  const effectiveEntries = effectiveContext.entries.filter(({ ledger, payment }) => {
-    if (effectiveFilters.paymentMethod && ledger.paymentMethod !== effectiveFilters.paymentMethod) {
+  const mappedPayments = [];
+  let batchCount = 0;
+  const batchSize = Math.max(limit + 1, limit * PAGE_SCAN_MULTIPLIER);
+  let hasMoreRaw = true;
+
+  const includeByStatus = (view) => {
+    if (statusFilter === PAYMENT_STATUS.REVERSED) {
+      return !view.effectiveLedger;
+    }
+    if (statusFilter === PAYMENT_STATUS.SUCCESS) {
+      return Boolean(view.effectiveLedger);
+    }
+    return true;
+  };
+
+  const includeByEffectiveFilters = (view) => {
+    if (!view.effectiveLedger) {
+      return statusFilter === PAYMENT_STATUS.REVERSED;
+    }
+    if (effectiveFilters.paymentMethod && view.paymentMethod !== effectiveFilters.paymentMethod) {
       return false;
     }
     if (effectiveFilters.paymentDate) {
-      const timestamp = new Date(ledger.paymentDate).getTime();
+      const timestamp = new Date(view.paymentDate).getTime();
       if (
         effectiveFilters.paymentDate.$gte &&
         timestamp < effectiveFilters.paymentDate.$gte.getTime()
@@ -206,20 +215,73 @@ const getCollectionReport = async (filters = {}, actor) => {
         return false;
       }
     }
-    if (statusFilter === PAYMENT_STATUS.REVERSED) {
-      return false;
+    return true;
+  };
+
+  while (hasMoreRaw && mappedPayments.length <= limit && batchCount < MAX_PAGE_SCAN_BATCHES) {
+    batchCount += 1;
+    const listQuery = { ...query };
+    if (cursorState) {
+      listQuery._id = { $lt: cursorState._id };
     }
-    if (statusFilter === PAYMENT_STATUS.SUCCESS) {
-      return true;
+
+    const paymentRows = await Payment.find(listQuery)
+      .populate("customer", "name passbookNumber phone")
+      .populate("scheme", "enrollmentNumber schemeName status")
+      .populate("collectedBy", "name role")
+      .sort({ _id: -1 })
+      .limit(batchSize)
+      .lean();
+
+    if (!paymentRows.length) {
+      hasMoreRaw = false;
+      break;
     }
-    return payment.status === statusFilter;
+
+    const enriched = await enrichPaymentsWithEffectiveView(paymentRows);
+    for (const { payment, view, latest } of enriched) {
+      if (!includeByStatus(view) || !includeByEffectiveFilters(view)) {
+        continue;
+      }
+      mappedPayments.push(mapCollectionPayment(payment, applyEffectivePaymentRow(payment, latest)));
+      if (mappedPayments.length > limit) {
+        break;
+      }
+    }
+
+    const tail = paymentRows[paymentRows.length - 1];
+    cursorState = {
+      _id: tail._id,
+    };
+    hasMoreRaw = paymentRows.length === batchSize;
+  }
+
+  const effectiveContext = await loadEffectivePaymentContext(query);
+
+  const paymentPage = buildCursorPage(mappedPayments, {
+    limit,
+    getCursorValue: (row) => ({
+      _id: row._id,
+      scope: scopeToken,
+    }),
   });
 
+  const effectiveEntries = filterEffectiveEntries(effectiveContext.entries, {
+    paymentDate: effectiveFilters.paymentDate,
+    paymentMethod: effectiveFilters.paymentMethod,
+  });
+  const scopedEffectiveEntries =
+    statusFilter === PAYMENT_STATUS.REVERSED ? [] : effectiveEntries;
+  const effectiveByMethod = scopedEffectiveEntries.reduce((acc, { ledger }) => {
+    const key = ledger.paymentMethod;
+    acc[key] = (acc[key] || 0) + ledger.amount;
+    return acc;
+  }, {});
   const methodTotals = {
-    CASH: sumMethod(successBreakdown, PAYMENT_METHODS.CASH),
-    UPI: sumMethod(successBreakdown, PAYMENT_METHODS.UPI),
-    BANK: sumMethod(successBreakdown, PAYMENT_METHODS.BANK),
-    CARD: sumMethod(successBreakdown, PAYMENT_METHODS.CARD),
+    CASH: effectiveByMethod[PAYMENT_METHODS.CASH] || 0,
+    UPI: effectiveByMethod[PAYMENT_METHODS.UPI] || 0,
+    BANK: effectiveByMethod[PAYMENT_METHODS.BANK] || 0,
+    CARD: effectiveByMethod[PAYMENT_METHODS.CARD] || 0,
   };
 
   const effectivelyReversedCount =
@@ -228,10 +290,10 @@ const getCollectionReport = async (filters = {}, actor) => {
   return {
     from: range.from || null,
     to: range.to || null,
-    totalCollection: Object.values(methodTotals).reduce((sum, value) => sum + value, 0),
+    totalCollection: scopedEffectiveEntries.reduce((sum, { ledger }) => sum + ledger.amount, 0),
     methodTotals,
-    successPaymentCount: effectiveEntries.length,
-    reversedPaymentCount: rawReversedCount + effectivelyReversedCount,
+    successPaymentCount: statusFilter === PAYMENT_STATUS.REVERSED ? 0 : scopedEffectiveEntries.length,
+    reversedPaymentCount: effectivelyReversedCount,
     payments: paymentPage.items,
     pageInfo: paymentPage.pageInfo,
   };
@@ -255,12 +317,29 @@ const getStaffPerformanceReport = async (filters = {}) => {
   }
 
   const staffUsers = await User.find(staffQuery).sort({ name: 1 }).lean();
-  const [profiles, effectiveContext] = await Promise.all([
+  const [profiles, effectiveContext, submissionRows] = await Promise.all([
     StaffProfile.find({ user: { $in: staffUsers.map((staff) => staff._id) } }).lean(),
     loadEffectivePaymentContext(query),
+    CashSubmission.aggregate([
+      {
+        $match: {
+          staff: { $in: staffUsers.map((staff) => staff._id) },
+          status: "ACTIVE",
+        },
+      },
+      {
+        $group: {
+          _id: "$staff",
+          total: { $sum: "$submittedAmount" },
+        },
+      },
+    ]),
   ]);
 
   const profileMap = new Map(profiles.map((profile) => [String(profile.user), profile]));
+  const submittedByStaff = new Map(
+    submissionRows.map((row) => [String(row._id), row.total || 0])
+  );
   const methodTotalsByStaff = new Map();
   const recentByStaff = new Map();
 
@@ -297,8 +376,7 @@ const getStaffPerformanceReport = async (filters = {}) => {
     recentByStaff.set(staffId, recentBucket);
   }
 
-  const staffList = await Promise.all(
-    staffUsers.map(async (staff) => {
+  const staffList = staffUsers.map((staff) => {
       const staffId = String(staff._id);
       const methodMap = methodTotalsByStaff.get(staffId) || new Map();
       const breakdown = Array.from(methodMap.entries()).map(([paymentMethod, value]) => ({
@@ -306,14 +384,6 @@ const getStaffPerformanceReport = async (filters = {}) => {
         total: value.total,
         count: value.count,
       }));
-
-      const [cashSummary, submissionAgg] = await Promise.all([
-        getStaffCashInHand(staff._id),
-        CashSubmission.aggregate([
-          { $match: { staff: staff._id } },
-          { $group: { _id: null, total: { $sum: "$submittedAmount" } } },
-        ]),
-      ]);
 
       const recentPaymentsRaw = (recentByStaff.get(staffId) || [])
         .sort(
@@ -340,7 +410,8 @@ const getStaffPerformanceReport = async (filters = {}) => {
         sumMethod(breakdown, PAYMENT_METHODS.CARD);
       const totalCollected = breakdown.reduce((sum, row) => sum + row.total, 0);
       const paymentCount = breakdown.reduce((sum, row) => sum + row.count, 0);
-      const submittedCash = submissionAgg[0]?.total || 0;
+      const submittedCash = submittedByStaff.get(staffId) || 0;
+      const cashInHand = cashCollected - submittedCash;
       const profile = profileMap.get(staffId);
 
       return {
@@ -352,15 +423,14 @@ const getStaffPerformanceReport = async (filters = {}) => {
         cashCollected,
         onlineCollected,
         paymentCount,
-        cashInHand: cashSummary.cashInHand,
-        cashCollectedAllTime: cashSummary.cashCollected,
+        cashInHand,
+        cashCollectedAllTime: cashCollected,
         submittedCash,
-        submittedCashAllTime: cashSummary.cashSubmitted,
-        pendingCash: cashSummary.cashInHand,
+        submittedCashAllTime: submittedCash,
+        pendingCash: cashInHand,
         recentPayments: recentPaymentsRaw,
       };
-    })
-  );
+    });
 
   return {
     from: range.from || null,
@@ -456,6 +526,7 @@ const getSchemeReport = async (filters = {}) => {
       startDate: scheme.startDate,
       sixMonthDate: scheme.sixMonthDate,
       maturityDate: scheme.maturityDate,
+      createdAt: scheme.createdAt,
       statusHistorySummary: (scheme.statusHistory || []).map((entry) => ({
         status: entry.status,
         changedAt: entry.changedAt,
@@ -468,7 +539,7 @@ const getSchemeReport = async (filters = {}) => {
     limit,
     getCursorValue: (row) => ({
       maturityDate: row.maturityDate,
-      createdAt: row.startDate,
+      createdAt: row.createdAt,
       _id: row.schemeId,
     }),
   });
@@ -559,7 +630,16 @@ const getMaturityCalendar = async (filters = {}) => {
 };
 
 const getCustomerLedger = async (customerId, actor = null) => {
-  const detail = await getCustomerDetail(customerId, actor);
+  if (actor?.role === USER_ROLES.STAFF) {
+    const hasCollected = await Payment.exists({
+      customer: toObjectId(customerId, "customer id"),
+      collectedBy: actor._id,
+    });
+    if (!hasCollected) {
+      throw new ApiError(403, "Forbidden.");
+    }
+  }
+  const detail = await getCustomerDetail(customerId, actor, { forceFull: true });
   const allPayments = await Payment.find({ customer: customerId })
     .populate("scheme", "enrollmentNumber schemeName status")
     .populate("collectedBy", "name role")
@@ -635,7 +715,16 @@ const getCustomerLedger = async (customerId, actor = null) => {
   };
 };
 
-const getSchemeLedger = async (schemeId) => {
+const getSchemeLedger = async (schemeId, actor = null) => {
+  if (actor?.role === USER_ROLES.STAFF) {
+    const hasCollected = await Payment.exists({
+      scheme: toObjectId(schemeId, "scheme id"),
+      collectedBy: actor._id,
+    });
+    if (!hasCollected) {
+      throw new ApiError(403, "Forbidden.");
+    }
+  }
   const schemeDoc = await Scheme.findById(schemeId).lean();
   if (!schemeDoc) throw new ApiError(404, "Scheme not found.");
 

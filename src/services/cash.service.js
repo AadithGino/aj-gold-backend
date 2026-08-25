@@ -36,6 +36,8 @@ const {
   aggregateEffectiveTotal,
   getEffectiveTotalPaidTillNow,
   getEffectiveReceiptFields,
+  enrichPaymentsWithEffectiveView,
+  applyEffectivePaymentRow,
 } = require("../utils/effectiveReadModel");
 const { getLatestApprovedCorrection } = require("../utils/effectivePayment");
 
@@ -143,30 +145,77 @@ const getStaffCollectionTotal = async (staffId, from, to) => {
 
 const getStaffPaymentHistory = async (staffId, { from, to, limit = 50, paymentMethod } = {}) => {
   const staffObjectId = toObjectId(staffId, "staff id");
-  const query = {
-    collectedBy: staffObjectId,
-    status: PAYMENT_STATUS.SUCCESS,
+  const safeLimit = Math.max(1, Math.min(Number(limit) || 50, 500));
+  const batchSize = Math.max(safeLimit + 1, safeLimit * 2);
+  const items = [];
+  let hasMore = true;
+  let cursor = null;
+  let safety = 0;
+
+  const inRange = (date) => {
+    const timestamp = new Date(date).getTime();
+    if (Number.isNaN(timestamp)) return false;
+    if (from && timestamp < from.getTime()) return false;
+    if (to && timestamp > to.getTime()) return false;
+    return true;
   };
 
-  if (from || to) {
-    query.paymentDate = {};
-    if (from) {
-      query.paymentDate.$gte = from;
+  while (hasMore && items.length < safeLimit && safety < 30) {
+    safety += 1;
+    const query = { collectedBy: staffObjectId };
+    if (cursor) {
+      query.$or = [
+        { createdAt: { $lt: cursor.createdAt } },
+        { createdAt: cursor.createdAt, _id: { $lt: cursor._id } },
+      ];
     }
-    if (to) {
-      query.paymentDate.$lte = to;
+
+    const rows = await Payment.find(query)
+      .populate("customer", "name passbookNumber")
+      .populate("scheme", "enrollmentNumber status")
+      .sort({ createdAt: -1, _id: -1 })
+      .limit(batchSize)
+      .select("-__v")
+      .lean();
+
+    if (!rows.length) {
+      hasMore = false;
+      break;
     }
-  }
-  if (paymentMethod) {
-    query.paymentMethod = paymentMethod;
+
+    const enriched = await enrichPaymentsWithEffectiveView(rows);
+    for (const { payment, view, latest } of enriched) {
+      if (!view.effectiveLedger) {
+        continue;
+      }
+      if (paymentMethod && view.paymentMethod !== paymentMethod) {
+        continue;
+      }
+      if (!inRange(view.paymentDate)) {
+        continue;
+      }
+      const effective = applyEffectivePaymentRow(payment, latest);
+      items.push({
+        ...payment,
+        amount: effective.displayAmount,
+        paymentMethod: effective.displayPaymentMethod,
+        paymentDate: effective.displayPaymentDate,
+        sourceAmount: payment.amount,
+        sourcePaymentMethod: payment.paymentMethod,
+        effectiveAmount: effective.effectiveAmount,
+        effectivePaymentMethod: effective.effectivePaymentMethod,
+      });
+      if (items.length >= safeLimit) {
+        break;
+      }
+    }
+
+    const tail = rows[rows.length - 1];
+    cursor = { createdAt: new Date(tail.createdAt), _id: tail._id };
+    hasMore = rows.length === batchSize;
   }
 
-  return Payment.find(query)
-    .populate("customer", "name passbookNumber")
-    .populate("scheme", "enrollmentNumber status")
-    .sort({ paymentDate: -1 })
-    .limit(limit)
-    .select("-__v");
+  return items;
 };
 
 const getStaffCashSubmissionHistory = async (staffId, { from, to } = {}) => {

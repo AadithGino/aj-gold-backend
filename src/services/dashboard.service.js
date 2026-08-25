@@ -100,6 +100,8 @@ const getAdminDashboard = async () => {
     recentPayments,
     staffUsers,
     topStaffRows,
+    allTimeCashByStaff,
+    submittedRows,
   ] = await Promise.all([
     Scheme.countDocuments({ status: SCHEME_STATUS.ACTIVE }),
     Scheme.countDocuments({
@@ -133,17 +135,34 @@ const getAdminDashboard = async () => {
         collectedByRole: USER_ROLES.STAFF,
       }
     ),
+    aggregateEffectiveByStaff(
+      { collectedByRole: USER_ROLES.STAFF },
+      { paymentMethod: PAYMENT_METHODS.CASH }
+    ),
+    CashSubmission.aggregate([
+      { $match: { status: "ACTIVE" } },
+      { $group: { _id: "$staff", total: { $sum: "$submittedAmount" } } },
+    ]),
   ]);
 
   const today = buildTodayMethodTotals(todayBreakdown);
   const cashPosition = await getCashPositionSummary();
 
-  const staffCashSummaries = await Promise.all(
-    staffUsers.map(async (staff) => {
-      const summary = await getStaffCashInHand(staff._id);
-      return { staff, ...summary };
-    })
+  const submittedByStaff = new Map(
+    submittedRows.map((row) => [String(row._id), row.total || 0])
   );
+  const staffCashSummaries = staffUsers.map((staff) => {
+    const staffId = String(staff._id);
+    const cashCollected = allTimeCashByStaff.get(staffId)?.total || 0;
+    const cashSubmitted = submittedByStaff.get(staffId) || 0;
+    const cashInHand = cashCollected - cashSubmitted;
+    return {
+      staff,
+      cashCollected,
+      cashSubmitted,
+      cashInHand,
+    };
+  });
 
   const pendingStaff = staffCashSummaries.filter((row) => row.cashInHand > 0);
   const totalStaffCashInHand = staffCashSummaries.reduce(

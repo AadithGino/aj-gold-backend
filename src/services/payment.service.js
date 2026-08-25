@@ -56,6 +56,37 @@ const {
 } = require("../utils/effectiveReadModel");
 
 const MAX_LIST_LIMIT = 200;
+const PAGE_SCAN_MULTIPLIER = 3;
+const MAX_PAGE_SCAN_BATCHES = 40;
+
+const buildListScopeToken = ({ actor, query, method, customRange }) =>
+  JSON.stringify({
+    actorRole: actor?.role || null,
+    actorId: actor?._id ? String(actor._id) : null,
+    collectedBy: query.collectedBy ? String(query.collectedBy) : null,
+    customer: query.customer ? String(query.customer) : null,
+    scheme: query.scheme ? String(query.scheme) : null,
+    method: method || null,
+    from: customRange.from ? customRange.from.toISOString() : null,
+    to: customRange.to ? customRange.to.toISOString() : null,
+  });
+
+const assertPaymentsCursor = (decodedCursor, scopeToken) => {
+  if (!decodedCursor) return null;
+  if (
+    typeof decodedCursor !== "object" ||
+    !decodedCursor._id ||
+    typeof decodedCursor.scope !== "string"
+  ) {
+    throw new ApiError(400, "Invalid cursor.");
+  }
+  if (decodedCursor.scope !== scopeToken) {
+    throw new ApiError(400, "Cursor does not match the current scope.");
+  }
+  return {
+    _id: decodedCursor._id,
+  };
+};
 
 const assertCollectorAllowed = async (actor) => {
   if (actor.role === USER_ROLES.ADMIN) {
@@ -360,6 +391,9 @@ const listPayments = async (
   if (customRange.error) {
     throw new ApiError(400, customRange.error);
   }
+  if (method && !Object.values(PAYMENT_METHODS).includes(method)) {
+    throw new ApiError(400, "Invalid payment method filter.");
+  }
 
   const { limit: resolvedLimit, cursor: decodedCursor } = parseCursorPagination(
     { cursor, limit },
@@ -380,60 +414,81 @@ const listPayments = async (
     query.scheme = schemeId;
   }
   if (customRange.from || customRange.to) {
-    query.paymentDate = {};
-    if (customRange.from) {
-      query.paymentDate.$gte = customRange.from;
-    }
-    if (customRange.to) {
-      query.paymentDate.$lte = customRange.to;
-    }
+    // Date filtering is applied on canonical effective payment dates
+    // after correction overlays. The scan order remains immutable.
+    query.paymentDate = undefined;
   }
+  delete query.paymentDate;
 
-  if (decodedCursor?.paymentDate && decodedCursor?.createdAt && decodedCursor?._id) {
-    query.$or = [
-      { paymentDate: { $lt: new Date(decodedCursor.paymentDate) } },
-      {
-        paymentDate: new Date(decodedCursor.paymentDate),
-        createdAt: { $lt: new Date(decodedCursor.createdAt) },
-      },
-      {
-        paymentDate: new Date(decodedCursor.paymentDate),
-        createdAt: new Date(decodedCursor.createdAt),
-        _id: { $lt: decodedCursor._id },
-      },
-    ];
-  }
+  const scopeToken = buildListScopeToken({ actor, query, method, customRange });
+  let cursorState = assertPaymentsCursor(decodedCursor, scopeToken);
 
-  const rows = await Payment.find(query)
-    .populate("customer", "name phone passbookNumber")
-    .populate("scheme", "enrollmentNumber status")
-    .populate("collectedBy", "name role")
-    .sort({ paymentDate: -1, createdAt: -1, _id: -1 })
-    .limit(resolvedLimit + 1)
-    .lean();
+  const items = [];
+  let batchCount = 0;
+  const batchSize = Math.max(resolvedLimit + 1, resolvedLimit * PAGE_SCAN_MULTIPLIER);
+  let hasMoreRaw = true;
 
-  const enriched = await enrichPaymentsWithEffectiveView(rows);
-  const items = enriched
-    .filter(({ view }) => {
+  const inEffectiveDateRange = (effectiveDate) => {
+    const timestamp = new Date(effectiveDate).getTime();
+    if (Number.isNaN(timestamp)) return false;
+    if (customRange.from && timestamp < customRange.from.getTime()) {
+      return false;
+    }
+    if (customRange.to && timestamp > customRange.to.getTime()) {
+      return false;
+    }
+    return true;
+  };
+
+  while (hasMoreRaw && items.length <= resolvedLimit && batchCount < MAX_PAGE_SCAN_BATCHES) {
+    batchCount += 1;
+    const listQuery = { ...query };
+    if (cursorState) {
+      listQuery._id = { $lt: cursorState._id };
+    }
+
+    const rows = await Payment.find(listQuery)
+      .populate("customer", "name phone passbookNumber")
+      .populate("scheme", "enrollmentNumber status")
+      .populate("collectedBy", "name role")
+      .sort({ _id: -1 })
+      .limit(batchSize)
+      .lean();
+
+    if (!rows.length) {
+      hasMoreRaw = false;
+      break;
+    }
+
+    const enriched = await enrichPaymentsWithEffectiveView(rows);
+    for (const { payment, view, latest } of enriched) {
       if (!view.effectiveLedger) {
-        return false;
-      }
-      if (method && !Object.values(PAYMENT_METHODS).includes(method)) {
-        throw new ApiError(400, "Invalid payment method filter.");
+        continue;
       }
       if (method && view.paymentMethod !== method) {
-        return false;
+        continue;
       }
-      return true;
-    })
-    .map(({ payment, latest }) => mapPayment(payment, applyEffectivePaymentRow(payment, latest)));
+      if (!inEffectiveDateRange(view.paymentDate)) {
+        continue;
+      }
+      items.push(mapPayment(payment, applyEffectivePaymentRow(payment, latest)));
+      if (items.length > resolvedLimit) {
+        break;
+      }
+    }
+
+    const tail = rows[rows.length - 1];
+    cursorState = {
+      _id: tail._id,
+    };
+    hasMoreRaw = rows.length === batchSize;
+  }
 
   return buildCursorPage(items, {
     limit: resolvedLimit,
     getCursorValue: (row) => ({
-      paymentDate: row.paymentDate,
-      createdAt: row.createdAt,
       _id: row._id,
+      scope: scopeToken,
     }),
   });
 };

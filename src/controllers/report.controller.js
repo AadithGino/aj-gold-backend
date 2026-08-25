@@ -75,7 +75,7 @@ const customerLedgerHandler = asyncHandler(async (req, res) => {
 
 const schemeLedgerHandler = asyncHandler(async (req, res) => {
   await assertStaffReportAccess(req.user);
-  const data = await getSchemeLedger(req.params.schemeId);
+  const data = await getSchemeLedger(req.params.schemeId, req.user);
   res.json({ success: true, data });
 });
 
