@@ -2,6 +2,7 @@ const { describe, it, before, after, beforeEach } = require("node:test");
 const assert = require("node:assert/strict");
 const crypto = require("crypto");
 const bcrypt = require("bcryptjs");
+const { spawnSync } = require("node:child_process");
 const fs = require("fs");
 const path = require("path");
 const mongoose = require("mongoose");
@@ -47,6 +48,7 @@ const migration009 = require("../src/migrations/versions/009_enforce_required_in
 const migration011 = require("../src/migrations/versions/011_payment_correction_version_backfill_batched");
 const { runMigration002Safe } = require("../src/migrations/safeRunners/002_financial_journal_backfill.safe");
 const { SCHEME_STATUS, PAYMENT_STATUS } = require("../src/constants/enums");
+const { verifyRequiredIndexes } = require("../src/ops/requiredIndexes");
 
 const reqId = () => crypto.randomUUID();
 
@@ -137,6 +139,99 @@ describe("Corrective Phase 5 — migrations, outbox, backups, packaging", () => 
     const applied = report.filter((row) => row.status === "applied").map((row) => row.id);
     const migrationIds = loadMigrationFiles().map((row) => row.id);
     assert.deepEqual(applied, migrationIds);
+  });
+
+  it("schema readiness completes catalog work before first customer write", async () => {
+    const db = mongoose.connection.db;
+    await verifyRequiredIndexes(db);
+    await User.create({
+      name: "Admin",
+      phone: `91${Date.now().toString().slice(-8)}`,
+      passwordHash: await bcrypt.hash("admin12345", 10),
+      role: "ADMIN",
+      status: "ACTIVE",
+    });
+
+    const runCustomerCreate = (suffix) =>
+      spawnSync(
+        process.execPath,
+        [
+          "-e",
+          `
+            const mongoose = require("mongoose");
+            const { connectDb } = require("./src/config/db");
+            const User = require("./src/models/user.model");
+            const { createCustomer } = require("./src/services/customer.service");
+
+            const events = [];
+            mongoose.set("debug", (collectionName, method) => {
+              events.push({ collectionName, method });
+              console.log("MDBG " + JSON.stringify({ collectionName, method }));
+            });
+
+            (async () => {
+              await connectDb(process.env.MONGO_URI);
+              const admin = await User.findOne({ role: "ADMIN" });
+              await createCustomer(
+                {
+                  name: "Readiness Customer ${suffix}",
+                  phone: "8${Date.now().toString().slice(-8)}${suffix}",
+                },
+                admin
+              );
+              await mongoose.connection.close();
+            })().catch(async (error) => {
+              console.error(error.stack || error.message);
+              if (mongoose.connection.readyState !== 0) {
+                await mongoose.connection.close();
+              }
+              process.exit(1);
+            });
+          `,
+        ],
+        {
+          cwd: path.join(__dirname, ".."),
+          env: {
+            ...process.env,
+            NODE_ENV: "test",
+            MONGO_URI: replSet.getUri(mongoose.connection.name),
+          },
+          encoding: "utf8",
+        }
+      );
+
+    const firstRun = runCustomerCreate("1");
+    assert.equal(firstRun.status, 0, firstRun.stderr || firstRun.stdout);
+    const firstEvents = firstRun.stdout
+      .split("\n")
+      .filter((line) => line.startsWith("MDBG "))
+      .map((line) => JSON.parse(line.slice(5)));
+
+    const firstCustomerInsertIndex = firstEvents.findIndex(
+      (event) => event.collectionName === "customers" && event.method === "insertOne"
+    );
+    assert.ok(firstCustomerInsertIndex >= 0, "Expected first customer insert");
+
+    const catalogMethods = new Set([
+      "createCollection",
+      "createIndex",
+      "createIndexes",
+      "ensureIndexes",
+      "dropIndex",
+      "dropIndexes",
+      "collMod",
+    ]);
+    const postInsertCatalogOps = firstEvents
+      .slice(firstCustomerInsertIndex + 1)
+      .filter((event) => catalogMethods.has(event.method));
+    assert.equal(
+      postInsertCatalogOps.length,
+      0,
+      `Catalog operations after first customer insert: ${JSON.stringify(postInsertCatalogOps)}`
+    );
+
+    const secondRun = runCustomerCreate("2");
+    assert.equal(secondRun.status, 0, secondRun.stderr || secondRun.stdout);
   });
 
   it("migration 002 safe runner processes representative records beyond one batch", async () => {
