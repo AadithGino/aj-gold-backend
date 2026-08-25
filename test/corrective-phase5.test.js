@@ -28,6 +28,7 @@ const {
   releaseMigrationLock,
   LOCK_TTL_MS,
   loadMigrationFiles,
+  verifyMigrationsApplied,
 } = require("../src/migrations/runMigrations");
 const {
   enqueueOutboxEvent,
@@ -39,7 +40,13 @@ const {
 const { assertBackupAllowed } = require("../src/ops/destructiveGuard");
 const { runStartupPreflight } = require("../src/ops/preflight");
 const { computeChecksum } = require("../src/migrations/runMigrations");
+const { getIntegritySummary } = require("../src/services/adminOversight.service");
 const migration006 = require("../src/migrations/versions/006_unique_employee_code_and_notification_dedupe");
+const migration008 = require("../src/migrations/versions/008_payment_correction_version_invariant");
+const migration009 = require("../src/migrations/versions/009_enforce_required_index_options");
+const migration011 = require("../src/migrations/versions/011_payment_correction_version_backfill_batched");
+const { runMigration002Safe } = require("../src/migrations/safeRunners/002_financial_journal_backfill.safe");
+const { SCHEME_STATUS, PAYMENT_STATUS } = require("../src/constants/enums");
 
 const reqId = () => crypto.randomUUID();
 
@@ -118,6 +125,156 @@ describe("Corrective Phase 5 — migrations, outbox, backups, packaging", () => 
     await releaseMigrationLock(db, "fresh-runner");
   });
 
+  it("fresh empty database applies every migration deterministically", async () => {
+    const db = mongoose.connection.db;
+    for (const collection of Object.values(mongoose.connection.collections)) {
+      await collection.deleteMany({});
+    }
+    await db.collection("schema_migrations").deleteMany({});
+    await db.collection("schema_migration_locks").deleteMany({});
+
+    const report = await runMigrations(db);
+    const applied = report.filter((row) => row.status === "applied").map((row) => row.id);
+    const migrationIds = loadMigrationFiles().map((row) => row.id);
+    assert.deepEqual(applied, migrationIds);
+  });
+
+  it("migration 002 safe runner processes representative records beyond one batch", async () => {
+    const db = mongoose.connection.db;
+    const customerId = new mongoose.Types.ObjectId();
+    const schemeId = new mongoose.Types.ObjectId();
+    await db.collection("schemes").insertOne({
+      _id: schemeId,
+      enrollmentNumber: `ENR-CP5-BATCH-${Date.now()}`,
+      customer: customerId,
+      status: SCHEME_STATUS.ACTIVE,
+    });
+
+    const paymentRows = Array.from({ length: 650 }, (_, index) => ({
+      _id: new mongoose.Types.ObjectId(),
+      receiptNumber: `RCT-CP5-BATCH-${index}-${Date.now()}`,
+      customer: customerId,
+      scheme: schemeId,
+      status: PAYMENT_STATUS.SUCCESS,
+      amount: 100 + (index % 5),
+      paymentMethod: "CASH",
+      paymentDate: new Date(`2026-01-${String((index % 28) + 1).padStart(2, "0")}T00:00:00.000Z`),
+      createdAt: new Date(),
+    }));
+    await db.collection("payments").insertMany(paymentRows);
+
+    await runMigration002Safe(db);
+    const migrated = await db.collection("financialjournals").countDocuments({
+      eventType: "COLLECTION_RECEIVED",
+      "metadata.migrated": true,
+    });
+    assert.equal(migrated, paymentRows.length);
+  });
+
+  it("migration 011 resumes from checkpoint and completes deterministically", async () => {
+    const db = mongoose.connection.db;
+    const firstPayment = new mongoose.Types.ObjectId();
+    const secondPayment = new mongoose.Types.ObjectId();
+    await db.collection("paymentcorrections").insertMany([
+      {
+        _id: new mongoose.Types.ObjectId(),
+        payment: firstPayment,
+        status: "APPROVED",
+        version: 1,
+        reviewedAt: new Date("2026-01-01"),
+        createdAt: new Date("2026-01-01"),
+      },
+      {
+        _id: new mongoose.Types.ObjectId(),
+        payment: firstPayment,
+        status: "APPROVED",
+        version: 2,
+        reviewedAt: new Date("2026-01-02"),
+        createdAt: new Date("2026-01-02"),
+      },
+      {
+        _id: new mongoose.Types.ObjectId(),
+        payment: secondPayment,
+        status: "APPROVED",
+        version: 9,
+        reviewedAt: new Date("2026-01-03"),
+        createdAt: new Date("2026-01-03"),
+      },
+      {
+        _id: new mongoose.Types.ObjectId(),
+        payment: secondPayment,
+        status: "APPROVED",
+        version: 11,
+        reviewedAt: new Date("2026-01-04"),
+        createdAt: new Date("2026-01-04"),
+      },
+    ]);
+
+    await db.collection("schema_migration_progress").updateOne(
+      { _id: "011_payment_correction_version_backfill_batched" },
+      {
+        $set: {
+          lastPaymentId: firstPayment,
+          completed: false,
+        },
+      },
+      { upsert: true }
+    );
+
+    await migration011.up(db);
+
+    const rows = await db
+      .collection("paymentcorrections")
+      .find({ payment: secondPayment, status: "APPROVED" })
+      .sort({ reviewedAt: 1, createdAt: 1, _id: 1 })
+      .project({ version: 1 })
+      .toArray();
+    assert.deepEqual(
+      rows.map((row) => row.version),
+      [1, 2]
+    );
+    const checkpoint = await db
+      .collection("schema_migration_progress")
+      .findOne({ _id: "011_payment_correction_version_backfill_batched" });
+    assert.equal(checkpoint.completed, true);
+  });
+
+  it("already-applied legacy 002 checksum remains valid without executor metadata", async () => {
+    const db = mongoose.connection.db;
+    await db.collection("schema_migrations").deleteMany({});
+    const migrations = loadMigrationFiles();
+    await db.collection("schema_migrations").insertMany(
+      migrations.map((migration) => ({
+        id: migration.id,
+        checksum: migration.checksum,
+        status: "applied",
+      }))
+    );
+    await assert.doesNotReject(() => verifyMigrationsApplied(db));
+  });
+
+  it("safe executor checksum drift is detected during migration verify", async () => {
+    const db = mongoose.connection.db;
+    await db.collection("schema_migrations").deleteMany({});
+    const migrations = loadMigrationFiles();
+    await db.collection("schema_migrations").insertMany(
+      migrations.map((migration) => ({
+        id: migration.id,
+        checksum: migration.checksum,
+        status: "applied",
+        ...(migration.id === "002_financial_journal_backfill"
+          ? {
+              sourceChecksum: migration.checksum,
+              safeExecutorId: "002_financial_journal_backfill.safe",
+              safeExecutorVersion: "v1",
+              safeExecutorChecksum: "drifted-checksum",
+            }
+          : {}),
+      }))
+    );
+    await assert.rejects(() => verifyMigrationsApplied(db), /safe-executor/i);
+  });
+
   it("duplicate employeeCode migration stops with actionable report", async () => {
     const db = mongoose.connection.db;
     const userA = await User.create({
@@ -140,6 +297,301 @@ describe("Corrective Phase 5 — migrations, outbox, backups, packaging", () => 
     ]);
 
     await assert.rejects(() => migration006.up(db), /Duplicate employeeCode/i);
+  });
+
+  it("migration 002 safe runner does not fabricate payout fields and reports ambiguity", async () => {
+    const db = mongoose.connection.db;
+    const customerId = new mongoose.Types.ObjectId();
+
+    const ambiguousSchemeId = new mongoose.Types.ObjectId();
+    await db.collection("schemes").insertOne({
+      _id: ambiguousSchemeId,
+      enrollmentNumber: `ENR-CP5-A-${Date.now()}`,
+      customer: customerId,
+      status: SCHEME_STATUS.REDEEMED,
+      settlement: {
+        amount: 1000,
+        settledBy: new mongoose.Types.ObjectId(),
+      },
+      updatedAt: new Date(),
+    });
+    await db.collection("payments").insertOne({
+      _id: new mongoose.Types.ObjectId(),
+      receiptNumber: `RCT-CP5-A-${Date.now()}`,
+      customer: customerId,
+      scheme: ambiguousSchemeId,
+      status: PAYMENT_STATUS.SUCCESS,
+      amount: 1000,
+      paymentMethod: "CASH",
+      paymentDate: new Date(),
+      createdAt: new Date(),
+    });
+
+    const validSchemeId = new mongoose.Types.ObjectId();
+    await db.collection("schemes").insertOne({
+      _id: validSchemeId,
+      enrollmentNumber: `ENR-CP5-B-${Date.now()}`,
+      customer: customerId,
+      status: SCHEME_STATUS.REDEEMED,
+      settlement: {
+        amount: 2000,
+        settledBy: new mongoose.Types.ObjectId(),
+        payoutMethod: "CASH",
+      },
+      updatedAt: new Date(),
+    });
+    await db.collection("payments").insertOne({
+      _id: new mongoose.Types.ObjectId(),
+      receiptNumber: `RCT-CP5-B-${Date.now()}`,
+      customer: customerId,
+      scheme: validSchemeId,
+      status: PAYMENT_STATUS.SUCCESS,
+      amount: 2000,
+      paymentMethod: "CASH",
+      paymentDate: new Date(),
+      createdAt: new Date(),
+    });
+
+    await runMigration002Safe(db);
+
+    const ambiguousRows = await db.collection("journal_migration_ambiguous").find({}).toArray();
+    assert.ok(
+      ambiguousRows.some(
+        (row) =>
+          row.schemeId.toString() === ambiguousSchemeId.toString() &&
+          /payout method is missing/i.test(row.reason)
+      )
+    );
+
+    const paidEntry = await db
+      .collection("financialjournals")
+      .findOne({ businessKey: `scheme:${validSchemeId}:paid:legacy` });
+    assert.equal(paidEntry.metadata.payoutMethod, "CASH");
+    assert.equal(
+      Object.prototype.hasOwnProperty.call(paidEntry.metadata, "payoutReference"),
+      false
+    );
+  });
+
+  it("ambiguous legacy settlement from migration 002 blocks preflight without fabricated facts", async () => {
+    const db = mongoose.connection.db;
+    const customerId = new mongoose.Types.ObjectId();
+    const schemeId = new mongoose.Types.ObjectId();
+    await db.collection("schemes").insertOne({
+      _id: schemeId,
+      enrollmentNumber: `ENR-CP5-AMB-${Date.now()}`,
+      customer: customerId,
+      status: SCHEME_STATUS.REDEEMED,
+      settlement: {
+        amount: 3000,
+        settledBy: new mongoose.Types.ObjectId(),
+      },
+      updatedAt: new Date(),
+    });
+    await db.collection("payments").insertOne({
+      _id: new mongoose.Types.ObjectId(),
+      receiptNumber: `RCT-CP5-AMB-${Date.now()}`,
+      customer: customerId,
+      scheme: schemeId,
+      status: PAYMENT_STATUS.SUCCESS,
+      amount: 3000,
+      paymentMethod: "CASH",
+      paymentDate: new Date(),
+      createdAt: new Date(),
+    });
+
+    await runMigration002Safe(db);
+    const paid = await db.collection("financialjournals").findOne({
+      businessKey: `scheme:${schemeId}:paid:legacy`,
+    });
+    assert.equal(paid, null);
+    await assert.rejects(
+      () => runStartupPreflight({ requireMigrations: true }),
+      /Unresolved legacy migration ambiguity/
+    );
+  });
+
+  it("migration 008 enforces contiguous approved versions and unique partial index", async () => {
+    const db = mongoose.connection.db;
+    const paymentId = new mongoose.Types.ObjectId();
+    await db.collection("paymentcorrections").insertMany([
+      {
+        _id: new mongoose.Types.ObjectId(),
+        payment: paymentId,
+        status: "APPROVED",
+        version: 1,
+        reviewedAt: new Date("2026-01-01"),
+        createdAt: new Date("2026-01-01"),
+      },
+      {
+        _id: new mongoose.Types.ObjectId(),
+        payment: paymentId,
+        status: "APPROVED",
+        version: 7,
+        reviewedAt: new Date("2026-01-02"),
+        createdAt: new Date("2026-01-02"),
+      },
+    ]);
+
+    await migration008.up(db);
+
+    const versions = await db
+      .collection("paymentcorrections")
+      .find({ payment: paymentId, status: "APPROVED" })
+      .sort({ reviewedAt: 1, createdAt: 1, _id: 1 })
+      .project({ version: 1 })
+      .toArray();
+    assert.deepEqual(
+      versions.map((row) => row.version),
+      [1, 2]
+    );
+
+    const index = (await db.collection("paymentcorrections").indexes()).find(
+      (row) => row.name === "uniq_payment_correction_version_approved"
+    );
+    assert.equal(Boolean(index?.unique), true);
+    assert.ok(index?.partialFilterExpression?.status === "APPROVED");
+  });
+
+  it("migration 009 upgrades non-unique same-key employeeCode index safely", async () => {
+    const db = mongoose.connection.db;
+    await db.collection("staffprofiles").dropIndex("uniq_staff_employee_code").catch(() => {});
+    await db.collection("staffprofiles").createIndex({ employeeCode: 1 }, { name: "employee_code_tmp" });
+
+    const indexesBefore = await db.collection("staffprofiles").indexes();
+    assert.equal(indexesBefore.some((index) => index.name === "employee_code_tmp"), true);
+
+    await migration009.up(db);
+    const indexesAfter = await db.collection("staffprofiles").indexes();
+    const target = indexesAfter.find((index) => index.name === "uniq_staff_employee_code");
+    assert.equal(Boolean(target?.unique), true);
+  });
+
+  it("migration 009 rejects wrong option indexes and enforces exact ttl/partial/collation", async () => {
+    const db = mongoose.connection.db;
+    await db.collection("loginattempts").dropIndex("login_attempt_ttl").catch(() => {});
+    await db
+      .collection("loginattempts")
+      .createIndex({ expiresAt: 1 }, { name: "login_attempt_ttl", expireAfterSeconds: 600 });
+
+    await db.collection("notifications").dropIndex("uniq_notification_delivery_key").catch(() => {});
+    await db.collection("notifications").createIndex(
+      { deliveryKey: 1 },
+      {
+        name: "uniq_notification_delivery_key",
+        unique: true,
+        partialFilterExpression: { deliveryKey: { $exists: true } },
+      }
+    );
+
+    await migration009.up(db);
+
+    const ttlIndex = (await db.collection("loginattempts").indexes()).find(
+      (index) => index.name === "login_attempt_ttl"
+    );
+    assert.equal(ttlIndex.expireAfterSeconds, 0);
+
+    const deliveryKeyIndex = (await db.collection("notifications").indexes()).find(
+      (index) => index.name === "uniq_notification_delivery_key"
+    );
+    assert.deepEqual(deliveryKeyIndex.partialFilterExpression, {
+      deliveryKey: { $exists: true, $type: "string", $gt: "" },
+    });
+  });
+
+  it("migration 009 stops with actionable duplicates for employeeCode and deliveryKey", async () => {
+    const db = mongoose.connection.db;
+    await db.collection("staffprofiles").dropIndex("uniq_staff_employee_code").catch(() => {});
+    await db.collection("notifications").dropIndex("uniq_notification_delivery_key").catch(() => {});
+
+    const userA = await User.create({
+      name: "Staff Dup A",
+      phone: `8${String(Date.now()).slice(-8)}7`,
+      passwordHash: await bcrypt.hash("staffpass1", 10),
+      role: "STAFF",
+    });
+    const userB = await User.create({
+      name: "Staff Dup B",
+      phone: `8${String(Date.now()).slice(-8)}8`,
+      passwordHash: await bcrypt.hash("staffpass1", 10),
+      role: "STAFF",
+    });
+    await db.collection("staffprofiles").insertMany([
+      { user: userA._id, employeeCode: "EMP-DUP", permissions: {}, cashVersion: 0 },
+      { user: userB._id, employeeCode: "EMP-DUP", permissions: {}, cashVersion: 0 },
+    ]);
+
+    await assert.rejects(
+      async () => migration009.up(db),
+      (error) =>
+        /Duplicate values prevent unique index enforcement/.test(error.message) &&
+        Array.isArray(error.duplicates) &&
+        error.duplicates.length > 0
+    );
+
+    await db.collection("staffprofiles").deleteMany({ employeeCode: "EMP-DUP" });
+    await db.collection("notifications").insertMany([
+      {
+        recipient: userA._id,
+        type: "PAYMENT_RECEIVED",
+        title: "x",
+        message: "x",
+        deliveryKey: "DELIV-DUP",
+      },
+      {
+        recipient: userB._id,
+        type: "PAYMENT_RECEIVED",
+        title: "y",
+        message: "y",
+        deliveryKey: "DELIV-DUP",
+      },
+    ]);
+
+    await assert.rejects(
+      async () => migration009.up(db),
+      (error) =>
+        /Duplicate values prevent unique index enforcement/.test(error.message) &&
+        Array.isArray(error.duplicates) &&
+        error.duplicates.some((row) => row.value === "DELIV-DUP")
+    );
+  });
+
+  it("lost migration lease aborts the active migration run", async () => {
+    const db = mongoose.connection.db;
+    for (const collection of Object.values(mongoose.connection.collections)) {
+      await collection.deleteMany({});
+    }
+    await db.collection("schema_migrations").deleteMany({});
+    await db.collection("schema_migration_locks").deleteMany({});
+
+    const schemeId = new mongoose.Types.ObjectId();
+    const customerId = new mongoose.Types.ObjectId();
+    await db.collection("schemes").insertOne({
+      _id: schemeId,
+      enrollmentNumber: `ENR-LOCK-${Date.now()}`,
+      customer: customerId,
+      status: "ACTIVE",
+    });
+    const paymentRows = Array.from({ length: 1200 }, (_, index) => ({
+      _id: new mongoose.Types.ObjectId(),
+      receiptNumber: `RCT-LOCK-${index}-${Date.now()}`,
+      customer: customerId,
+      scheme: schemeId,
+      status: "SUCCESS",
+      amount: 100,
+      paymentMethod: "CASH",
+      paymentDate: new Date(),
+      createdAt: new Date(),
+    }));
+    await db.collection("payments").insertMany(paymentRows);
+
+    const runnerId = "lease-loss-runner";
+    const runPromise = runMigrations(db, { runnerId });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    await db
+      .collection("schema_migration_locks")
+      .deleteOne({ _id: "migration-runner", runnerId });
+    await assert.rejects(() => runPromise, /lock lost|expired/i);
   });
 
   it("CASH_SUBMITTED outbox event persists and delivers idempotently", async () => {
@@ -229,6 +681,34 @@ describe("Corrective Phase 5 — migrations, outbox, backups, packaging", () => 
     assert.equal(await Notification.countDocuments({ deliveryKey }), 1);
   });
 
+  it("outbox dedupe payload conflicts are rejected", async () => {
+    const key = `dedupe-conflict:${reqId()}`;
+    await enqueueOutboxEvent({
+      topic: OUTBOX_TOPICS.CASH_SUBMITTED,
+      dedupeKey: key,
+      payload: {
+        recipient: new mongoose.Types.ObjectId(),
+        type: NOTIFICATION_TYPES.CASH_SUBMITTED,
+        title: "One",
+        message: "One",
+      },
+    });
+    await assert.rejects(
+      async () =>
+        enqueueOutboxEvent({
+          topic: OUTBOX_TOPICS.CASH_SUBMITTED,
+          dedupeKey: key,
+          payload: {
+            recipient: new mongoose.Types.ObjectId(),
+            type: NOTIFICATION_TYPES.CASH_SUBMITTED,
+            title: "Two",
+            message: "Two",
+          },
+        }),
+      /OUTBOX_DEDUPE_PAYLOAD_MISMATCH|payload mismatch/i
+    );
+  });
+
   it("preflight fails when unresolved legacy migration ambiguity exists", async () => {
     await mongoose.connection.db.collection("journal_migration_ambiguous").insertOne({
       schemeId: new mongoose.Types.ObjectId(),
@@ -302,5 +782,18 @@ describe("Corrective Phase 5 — migrations, outbox, backups, packaging", () => 
     const metrics = await getOutboxHealthMetrics();
     assert.equal(metrics.deadLetterCount, 1);
     assert.ok(typeof metrics.queueAgeMs === "number");
+  });
+
+  it("oversight summary reports outbox deadLetter terminology", async () => {
+    await OutboxEvent.create({
+      topic: OUTBOX_TOPICS.CASH_SUBMITTED,
+      dedupeKey: `summary:${reqId()}`,
+      payload: {},
+      status: OUTBOX_STATUS.DEAD_LETTER,
+      attempts: MAX_ATTEMPTS,
+    });
+    const summary = await getIntegritySummary();
+    assert.equal(typeof summary.outbox.deadLetter, "number");
+    assert.equal(Object.prototype.hasOwnProperty.call(summary.outbox, "failed"), false);
   });
 });

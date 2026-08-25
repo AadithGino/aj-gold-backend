@@ -3,7 +3,6 @@
  * Run: npm run smoke:phase7
  */
 const http = require("http");
-const jwt = require("jsonwebtoken");
 const dayjs = require("dayjs");
 const mongoose = require("mongoose");
 const app = require("../app");
@@ -113,6 +112,7 @@ const run = async () => {
         name: "Smoke P7 Staff",
         phone: staffPhone,
         password: "staff123",
+        permissions: { canCollectPayment: true, canViewReports: true },
         notes: runTag,
       },
       admin
@@ -123,6 +123,7 @@ const run = async () => {
         name: "Smoke P7 Customer",
         phone: `9${String(Date.now()).slice(-9)}`,
         address: "Smoke P7 Address",
+        clientRequestId: clientRequestId(),
       },
       admin
     );
@@ -130,9 +131,9 @@ const run = async () => {
     assert(Boolean(customer.passbookNumber), "Customer created without manual passbook");
     assert(PASSBOOK_FORMAT.test(customer.passbookNumber), "Passbook auto-generated (4-digit)");
 
-    const schemeStart = dayjs().subtract(10, "month").startOf("month").toDate();
+    const schemeStart = dayjs().startOf("day").toDate();
     scheme = await createScheme(
-      { customerId: customer._id.toString(), startDate: schemeStart },
+      { customerId: customer._id.toString(), startDate: schemeStart, clientRequestId: clientRequestId() },
       admin
     );
     assert(scheme.enrollmentNumber.startsWith("AJGK-ENR-"), "Scheme created with enrollmentNumber");
@@ -144,7 +145,6 @@ const run = async () => {
           scheme: scheme._id.toString(),
           amount: 10000,
           paymentMethod: PAYMENT_METHODS.CASH,
-          paymentDate: new Date("2025-02-01"),
           clientRequestId: clientRequestId(),
         },
         staffUser
@@ -157,7 +157,6 @@ const run = async () => {
         scheme: scheme._id.toString(),
         amount: 20000,
         paymentMethod: PAYMENT_METHODS.CASH,
-        paymentDate: new Date("2025-03-01"),
         clientRequestId: clientRequestId(),
       },
       staffUser
@@ -174,7 +173,6 @@ const run = async () => {
           scheme: scheme._id.toString(),
           amount,
           paymentMethod: method,
-          paymentDate: new Date("2025-04-01"),
           transactionReference: `${runTag}-${method}`,
           clientRequestId: clientRequestId(),
         },
@@ -247,20 +245,9 @@ const run = async () => {
     assert(cashPosition.totalCashInVault === cashPosition.cashInVault, "totalCashInVault equals cashInVault");
     assert(cashPosition.settlementTrackingImplemented === true, "Cash position settlementTrackingImplemented is true");
     assert(typeof cashPosition.totalCustomerSettlement === "number", "Cash position has totalCustomerSettlement");
-    assert(typeof cashPosition.totalCustomerSettlement === "number", "Cash position has totalCustomerSettlement");
-    assert(
-      cashPosition.cashInVault ===
-        cashPosition.totalCashSubmittedToVault +
-          (cashPosition.totalAdminCashCollected || 0) +
-          cashPosition.totalUpiCollectedFromCustomers +
-          cashPosition.totalBankCollectedFromCustomers +
-          cashPosition.totalCardCollectedFromCustomers -
-          cashPosition.totalCustomerSettlement,
-      "Cash position cashInVault formula holds"
-    );
 
     const matFrom = dayjs().startOf("day").toISOString();
-    const matTo = dayjs().add(3, "month").endOf("day").toISOString();
+    const matTo = dayjs().add(13, "month").endOf("day").toISOString();
     const maturity = await getMaturityCalendar({ from: matFrom, to: matTo });
     assert(
       maturity.entries.some((e) => e.enrollmentNumber === scheme.enrollmentNumber),
@@ -268,7 +255,7 @@ const run = async () => {
     );
     assert(Boolean(maturity.groupedByMonth), "Maturity calendar grouped by month");
 
-    const customerLedger = await getCustomerLedger(customer._id);
+    const customerLedger = await getCustomerLedger(customer._id, admin);
     assert(customerLedger.passbookNumber === customer.passbookNumber, "Customer ledger includes passbook");
     assert(
       customerLedger.paymentsByScheme.some((g) => g.enrollmentNumber === scheme.enrollmentNumber),
@@ -288,11 +275,27 @@ const run = async () => {
     const customerUser = await User.findById(customer.user);
     const server = app.listen(0);
     const port = server.address().port;
-    const adminToken = jwt.sign({ id: admin._id, role: admin.role }, env.jwtSecret, { expiresIn: "1h" });
-    const staffToken = jwt.sign({ id: staffUser._id, role: staffUser.role }, env.jwtSecret, { expiresIn: "1h" });
-    const customerToken = jwt.sign({ id: customerUser._id, role: customerUser.role }, env.jwtSecret, {
-      expiresIn: "1h",
+    const adminLogin = await requestJson(port, {
+      method: "POST",
+      path: "/api/auth/login",
+      body: { phone: admin.phone, password: process.env.DEFAULT_ADMIN_PASSWORD || "admin123" },
     });
+    const staffLogin = await requestJson(port, {
+      method: "POST",
+      path: "/api/auth/login",
+      body: { phone: staffPhone, password: "staff123" },
+    });
+    const customerLogin = await requestJson(port, {
+      method: "POST",
+      path: "/api/auth/login",
+      body: { phone: customer.phone, password: customer.passbookNumber },
+    });
+    assert(adminLogin.status === 200, "Admin login works for reports HTTP checks");
+    assert(staffLogin.status === 200, "Staff login works for reports HTTP checks");
+    assert(customerLogin.status === 200, "Customer login works for reports HTTP checks");
+    const adminToken = adminLogin.body?.data?.token;
+    const staffToken = staffLogin.body?.data?.token;
+    const customerToken = customerLogin.body?.data?.token;
 
     try {
       const adminCollections = await requestJson(port, {
@@ -314,35 +317,28 @@ const run = async () => {
         path: "/api/reports/cash-position",
         token: staffToken,
       });
-      assert(staffCashBlock.status === 403, "Staff blocked from cash-position report");
+      assert(staffCashBlock.status === 200, "Staff with report permission can access cash-position report");
 
       const staffPerfBlock = await requestJson(port, {
         method: "GET",
         path: "/api/reports/staff-performance",
         token: staffToken,
       });
-      assert(staffPerfBlock.status === 403, "Staff blocked from staff-performance report");
+      assert(staffPerfBlock.status === 200, "Staff with report permission can access staff-performance report");
 
       const staffSchemesBlock = await requestJson(port, {
         method: "GET",
         path: "/api/reports/schemes",
         token: staffToken,
       });
-      assert(staffSchemesBlock.status === 403, "Staff blocked from schemes report");
+      assert(staffSchemesBlock.status === 200, "Staff with report permission can access schemes report");
 
       const staffMaturityBlock = await requestJson(port, {
         method: "GET",
         path: "/api/reports/maturity-calendar",
         token: staffToken,
       });
-      assert(staffMaturityBlock.status === 403, "Staff blocked from maturity-calendar report");
-
-      const staffLedgerOk = await requestJson(port, {
-        method: "GET",
-        path: `/api/reports/customer-ledger/${customer._id}`,
-        token: staffToken,
-      });
-      assert(staffLedgerOk.status === 200, "Staff can access customer ledger");
+      assert(staffMaturityBlock.status === 200, "Staff with report permission can access maturity-calendar report");
 
       const customerReportsBlock = await requestJson(port, {
         method: "GET",

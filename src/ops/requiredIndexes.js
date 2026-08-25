@@ -1,19 +1,41 @@
 const { SCHEME_STATUS, CORRECTION_STATUS } = require("../constants/enums");
 
-const indexHasShape = (indexes, keyShape, { unique = false, partial = null, name = null, ttl = null } = {}) =>
+const stringify = (value) => JSON.stringify(value ?? null);
+
+const hasOrderedKeyShape = (indexKey, keyShape) => {
+  const indexEntries = Object.entries(indexKey || {});
+  const shapeEntries = Object.entries(keyShape || {});
+  if (indexEntries.length !== shapeEntries.length) return false;
+  return shapeEntries.every(
+    ([field, direction], idx) =>
+      indexEntries[idx]?.[0] === field && indexEntries[idx]?.[1] === direction
+  );
+};
+
+const indexHasShape = (
+  indexes,
+  keyShape,
+  {
+    unique = false,
+    partial = null,
+    name = null,
+    ttl = null,
+    sparse = null,
+    collation = null,
+  } = {}
+) =>
   indexes.some((index) => {
-    const keys = Object.keys(index.key || {});
-    const shapeKeys = Object.keys(keyShape);
-    if (keys.length !== shapeKeys.length) return false;
-    if (!shapeKeys.every((key) => index.key[key] === keyShape[key])) return false;
+    if (!hasOrderedKeyShape(index.key, keyShape)) return false;
     if (unique && !index.unique) return false;
     if (name && index.name !== name) return false;
     if (partial) {
-      if (JSON.stringify(index.partialFilterExpression || null) !== JSON.stringify(partial)) {
+      if (stringify(index.partialFilterExpression) !== stringify(partial)) {
         return false;
       }
     }
     if (ttl !== null && index.expireAfterSeconds !== ttl) return false;
+    if (sparse !== null && Boolean(index.sparse) !== sparse) return false;
+    if (collation && stringify(index.collation) !== stringify(collation)) return false;
     return true;
   });
 
@@ -63,6 +85,12 @@ const REQUIRED_INDEXES = [
     label: "cash submissions by staff/date",
   },
   {
+    collection: "cashsubmissions",
+    key: { staff: 1, status: 1, submissionDate: -1 },
+    name: "staff_active_submissions",
+    label: "cash submissions active lifecycle index",
+  },
+  {
     collection: "schemes",
     key: { status: 1, "settlement.settledAt": -1 },
     label: "schemes by status/settlement date",
@@ -88,9 +116,25 @@ const REQUIRED_INDEXES = [
     label: "journal entryId unique",
   },
   {
+    collection: "financialjournals",
+    key: { scheme: 1, eventType: 1, effectiveAt: -1 },
+    label: "journal scheme/event/effectiveAt",
+  },
+  {
+    collection: "financialjournals",
+    key: { customer: 1, effectiveAt: -1 },
+    label: "journal customer/effectiveAt",
+  },
+  {
     collection: "outboxevents",
     key: { status: 1, nextAttemptAt: 1 },
     label: "outbox worker polling",
+  },
+  {
+    collection: "outboxevents",
+    key: { dedupeKey: 1 },
+    unique: true,
+    label: "outbox dedupe key unique",
   },
   {
     collection: "loginattempts",
@@ -145,6 +189,8 @@ const verifyRequiredIndexes = async (db) => {
         partial: spec.partial,
         name: spec.name,
         ttl: spec.ttl,
+        sparse: spec.sparse,
+        collation: spec.collation,
       })
     ) {
       missing.push(`${spec.collection}: ${spec.label}`);

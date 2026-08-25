@@ -120,9 +120,9 @@ const listOutboxEvents = async (query = {}) => {
 
 const getIntegritySummary = async () => {
   const reconciliation = await buildReconciliationSummary();
-  const [pendingOutbox, failedOutbox, pendingSettlements] = await Promise.all([
+  const [pendingOutbox, deadLetterOutbox, pendingSettlements] = await Promise.all([
     OutboxEvent.countDocuments({ status: "PENDING" }),
-    OutboxEvent.countDocuments({ status: "FAILED" }),
+    OutboxEvent.countDocuments({ status: "DEAD_LETTER" }),
     Scheme.countDocuments({
       "settlementWorkflow.status": { $in: ["APPROVED", "PAYOUT_PENDING", "PAID"] },
     }),
@@ -130,7 +130,7 @@ const getIntegritySummary = async () => {
 
   return {
     reconciliation,
-    outbox: { pending: pendingOutbox, failed: failedOutbox },
+    outbox: { pending: pendingOutbox, deadLetter: deadLetterOutbox },
     settlementsInProgress: pendingSettlements,
     timezone: "Asia/Kolkata",
     weekStartsOn: "Monday (ISO)",

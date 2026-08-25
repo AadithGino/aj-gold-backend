@@ -25,6 +25,9 @@ const main = () => {
   if (result.status !== 0) {
     throw new Error("mongodump failed. Ensure MongoDB Database Tools are installed.");
   }
+  if (!fs.existsSync(archivePath)) {
+    throw new Error(`mongodump completed without creating archive at ${archivePath}`);
+  }
 
   const buffer = fs.readFileSync(archivePath);
   const sha256 = crypto.createHash("sha256").update(buffer).digest("hex");
@@ -42,4 +45,9 @@ const main = () => {
   console.log(JSON.stringify({ success: true, archivePath, sidecarPath, dbName, sha256 }, null, 2));
 };
 
-main();
+try {
+  main();
+} catch (error) {
+  console.error(error.message || error);
+  process.exit(1);
+}

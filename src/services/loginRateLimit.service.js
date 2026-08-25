@@ -48,7 +48,7 @@ const upsertFailedAttempt = async (key, now) => {
           expiresAt: getExpiresAt(now),
         },
       },
-      { upsert: true, new: true }
+      { upsert: true, returnDocument: "after" }
     );
   }
 
@@ -58,14 +58,14 @@ const upsertFailedAttempt = async (key, now) => {
       $inc: { count: 1 },
       $set: { expiresAt: getExpiresAt(now) },
     },
-    { new: true }
+    { returnDocument: "after" }
   );
 
   if (updated.count > LOGIN_RATE_LIMIT_MAX) {
     return LoginAttempt.findOneAndUpdate(
       { key },
       { $set: { lockedUntil: new Date(now.getTime() + LOGIN_LOCKOUT_MS) } },
-      { new: true }
+      { returnDocument: "after" }
     );
   }
 

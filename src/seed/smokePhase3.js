@@ -3,7 +3,6 @@
  * Run: npm run smoke:phase3
  */
 const http = require("http");
-const jwt = require("jsonwebtoken");
 const mongoose = require("mongoose");
 const app = require("../app");
 const env = require("../config/env");
@@ -23,6 +22,7 @@ const {
 const { createStaff, listStaff, getStaffDetail } = require("../services/staff.service");
 const { createCashSubmission } = require("../services/cash.service");
 const { getStaffCashInHand } = require("../services/staffCash.service");
+const { collectPayment } = require("../services/payment.service");
 const { clientRequestId } = require("./smokeHelpers");
 const { generateReceiptNumber } = require("../services/receipt.service");
 const { calculateSchemeDates, createEnrollmentNumber } = require("../services/scheme.service");
@@ -91,6 +91,7 @@ const run = async () => {
       name: "Smoke Staff",
       phone: staffPhone,
       password: "staff123",
+      permissions: { canCollectPayment: true },
       notes: runTag,
     },
     admin
@@ -112,7 +113,7 @@ const run = async () => {
     updatedBy: admin._id,
   });
 
-  const dates = calculateSchemeDates(new Date("2025-01-01"));
+  const dates = calculateSchemeDates(new Date());
   const scheme = await Scheme.create({
     customer: customer._id,
     enrollmentNumber: await createEnrollmentNumber(),
@@ -123,17 +124,17 @@ const run = async () => {
     createdBy: admin._id,
   });
 
-  await Payment.create({
-    customer: customer._id,
-    scheme: scheme._id,
-    collectedBy: staffUser._id,
-    collectedByRole: USER_ROLES.STAFF,
-    amount: 15000,
-    paymentMethod: PAYMENT_METHODS.CASH,
-    paymentDate: new Date(),
-    receiptNumber: await generateReceiptNumber(),
-    status: PAYMENT_STATUS.SUCCESS,
-  });
+  await collectPayment(
+    {
+      customer: customer._id,
+      scheme: scheme._id,
+      amount: 15000,
+      paymentMethod: PAYMENT_METHODS.CASH,
+      receiptNumber: await generateReceiptNumber(),
+      clientRequestId: clientRequestId(),
+    },
+    staffUser
+  );
 
   const beforeSubmission = await getStaffCashInHand(staffUser._id);
   assert(beforeSubmission.cashInHand === 15000, "Staff cash in hand before submission is 15000");
@@ -162,36 +163,52 @@ const run = async () => {
   const port = server.address().port;
 
   try {
-    const adminToken = jwt.sign({ id: admin._id, role: admin.role }, env.jwtSecret, {
-      expiresIn: "1h",
+    const adminLogin = await requestJson(port, {
+      method: "POST",
+      path: "/api/auth/login",
+      body: {
+        phone: admin.phone,
+        password: process.env.DEFAULT_ADMIN_PASSWORD || "admin123",
+      },
     });
+    assert(adminLogin.status === 200, "Admin login succeeds for HTTP guard checks");
+    const adminAuthToken = adminLogin.body?.data?.token;
 
     const adminList = await requestJson(port, {
       method: "GET",
       path: "/api/admin/staff",
-      token: adminToken,
+      token: adminAuthToken,
     });
     assert(adminList.status === 200, "GET /api/admin/staff returns 200 for admin");
+
+    const staffLogin = await requestJson(port, {
+      method: "POST",
+      path: "/api/auth/login",
+      body: {
+        phone: staffPhone,
+        password: "staff123",
+      },
+    });
+    assert(staffLogin.status === 200, "Staff login succeeds for forbidden-route check");
 
     const forbidden = await requestJson(port, {
       method: "GET",
       path: "/api/admin/staff",
-      token: jwt.sign({ id: staffUser._id, role: USER_ROLES.STAFF }, env.jwtSecret, {
-        expiresIn: "1h",
-      }),
+      token: staffLogin.body?.data?.token,
     });
     assert(forbidden.status === 403, "Non-admin blocked from admin routes");
 
     const cashSubmitHttp = await requestJson(port, {
       method: "POST",
       path: "/api/admin/cash-submissions",
-      token: adminToken,
+      token: adminAuthToken,
       body: {
         staff: staffUser._id.toString(),
         submittedAmount: 2000,
         submissionDate: new Date().toISOString(),
         receivedBy: "Admin User",
         notes: SMOKE_TAG,
+        clientRequestId: clientRequestId(),
       },
     });
     assert(cashSubmitHttp.status === 201, "POST /api/admin/cash-submissions returns 201");

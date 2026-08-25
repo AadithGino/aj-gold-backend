@@ -373,7 +373,7 @@ const reverseCashSubmission = async (submissionId, payload, actor) => {
           reversalReason: reason,
         },
       },
-      { new: false, session }
+      { returnDocument: "before", session }
     );
 
     if (!submission) {

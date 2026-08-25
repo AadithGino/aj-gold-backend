@@ -3,7 +3,6 @@
  * Run: npm run smoke:phase6
  */
 const http = require("http");
-const jwt = require("jsonwebtoken");
 const mongoose = require("mongoose");
 const app = require("../app");
 const env = require("../config/env");
@@ -130,6 +129,7 @@ const run = async () => {
         name: "Smoke P6 Staff",
         phone: staffPhone,
         password: "staff123",
+        permissions: { canCollectPayment: true },
         notes: runTag,
       },
       admin
@@ -140,12 +140,13 @@ const run = async () => {
         name: "Smoke P6 Customer",
         phone: `4${String(Date.now()).slice(-9)}`,
         address: "Smoke P6 Address",
+        clientRequestId: clientRequestId(),
       },
       admin
     );
 
     const scheme = await createScheme(
-      { customerId: customer._id.toString(), startDate: new Date("2025-01-01") },
+      { customerId: customer._id.toString(), startDate: new Date(), clientRequestId: clientRequestId() },
       admin
     );
 
@@ -155,7 +156,6 @@ const run = async () => {
         scheme: scheme._id.toString(),
         amount: 12000,
         paymentMethod: PAYMENT_METHODS.CASH,
-        paymentDate: new Date("2025-02-01"),
         clientRequestId: clientRequestId(),
       },
       staffUser
@@ -209,11 +209,27 @@ const run = async () => {
 
     const server = app.listen(0);
     const port = server.address().port;
-    const adminToken = jwt.sign({ id: admin._id, role: admin.role }, env.jwtSecret, { expiresIn: "1h" });
-    const staffToken = jwt.sign({ id: staffUser._id, role: staffUser.role }, env.jwtSecret, { expiresIn: "1h" });
-    const customerToken = jwt.sign({ id: customerUser._id, role: customerUser.role }, env.jwtSecret, {
-      expiresIn: "1h",
+    const adminLogin = await requestJson(port, {
+      method: "POST",
+      path: "/api/auth/login",
+      body: { phone: admin.phone, password: process.env.DEFAULT_ADMIN_PASSWORD || "admin123" },
     });
+    const staffLogin = await requestJson(port, {
+      method: "POST",
+      path: "/api/auth/login",
+      body: { phone: staffPhone, password: "staff123" },
+    });
+    const customerLogin = await requestJson(port, {
+      method: "POST",
+      path: "/api/auth/login",
+      body: { phone: customer.phone, password: customer.passbookNumber },
+    });
+    assert(adminLogin.status === 200, "Admin login works for dashboard HTTP checks");
+    assert(staffLogin.status === 200, "Staff login works for dashboard HTTP checks");
+    assert(customerLogin.status === 200, "Customer login works for dashboard HTTP checks");
+    const adminToken = adminLogin.body?.data?.token;
+    const staffToken = staffLogin.body?.data?.token;
+    const customerToken = customerLogin.body?.data?.token;
 
     try {
       const adminRes = await requestJson(port, { method: "GET", path: "/api/dashboard/admin", token: adminToken });

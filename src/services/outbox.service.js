@@ -8,6 +8,19 @@ const BASE_BACKOFF_MS = 1000;
 const OUTBOX_LEASE_MS = Number(process.env.OUTBOX_LEASE_MS || 60_000);
 const workerOwner = () => `worker-${process.pid}-${crypto.randomUUID().slice(0, 8)}`;
 
+const normalizeValue = (value) => {
+  if (value === null || typeof value !== "object") return value;
+  if (Array.isArray(value)) return value.map((item) => normalizeValue(item));
+  return Object.keys(value)
+    .sort()
+    .reduce((acc, key) => {
+      acc[key] = normalizeValue(value[key]);
+      return acc;
+    }, {});
+};
+
+const stableSerialize = (value) => JSON.stringify(normalizeValue(value));
+
 const computeNextAttempt = (attempts) => {
   const delay = Math.min(BASE_BACKOFF_MS * 2 ** attempts, 60_000);
   return new Date(Date.now() + delay);
@@ -21,6 +34,19 @@ const enqueueOutboxEvent = async ({ topic, dedupeKey, payload }, session = null)
 
   const existing = await OutboxEvent.findOne({ dedupeKey: trimmedKey }).session(session || null);
   if (existing) {
+    const existingFingerprint = stableSerialize({
+      topic: existing.topic,
+      payload: existing.payload || null,
+    });
+    const candidateFingerprint = stableSerialize({
+      topic,
+      payload: payload || null,
+    });
+    if (existingFingerprint !== candidateFingerprint) {
+      const error = new Error("Outbox dedupeKey replay payload mismatch.");
+      error.code = "OUTBOX_DEDUPE_PAYLOAD_MISMATCH";
+      throw error;
+    }
     return existing;
   }
 
@@ -96,11 +122,6 @@ const buildClaimableQuery = (now) => ({
       attempts: { $lt: MAX_ATTEMPTS },
     },
     {
-      status: OUTBOX_STATUS.FAILED,
-      nextAttemptAt: { $lte: now },
-      attempts: { $lt: MAX_ATTEMPTS },
-    },
-    {
       status: OUTBOX_STATUS.PROCESSING,
       leaseExpiresAt: { $lte: now },
       attempts: { $lt: MAX_ATTEMPTS },
@@ -133,7 +154,7 @@ const processOutboxBatch = async ({ limit = 20, owner = workerOwner() } = {}) =>
           leaseExpiresAt,
         },
       },
-      { new: true }
+      { returnDocument: "after" }
     );
     if (!claimed) continue;
 
@@ -182,7 +203,7 @@ const getOutboxHealthMetrics = async () => {
   const now = new Date();
   const [oldestPending, processingLease, deadLetterCount, retryCount] = await Promise.all([
     OutboxEvent.findOne({
-      status: { $in: [OUTBOX_STATUS.PENDING, OUTBOX_STATUS.FAILED] },
+      status: OUTBOX_STATUS.PENDING,
     })
       .sort({ nextAttemptAt: 1, createdAt: 1 })
       .select("nextAttemptAt createdAt status")
@@ -193,7 +214,7 @@ const getOutboxHealthMetrics = async () => {
       .lean(),
     OutboxEvent.countDocuments({ status: OUTBOX_STATUS.DEAD_LETTER }),
     OutboxEvent.countDocuments({
-      status: { $in: [OUTBOX_STATUS.PENDING, OUTBOX_STATUS.FAILED] },
+      status: OUTBOX_STATUS.PENDING,
       attempts: { $gt: 0 },
     }),
   ]);

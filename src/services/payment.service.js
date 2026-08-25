@@ -187,7 +187,7 @@ const collectPayment = async (payload, actor) => {
     const scheme = await Scheme.findOneAndUpdate(
       { _id: payload.scheme, status: SCHEME_STATUS.ACTIVE },
       { $inc: { financialVersion: 1 } },
-      { new: true, session }
+      { returnDocument: "after", session }
     );
     if (!scheme) {
       const existing = await Scheme.findById(payload.scheme).session(session);

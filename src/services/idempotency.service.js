@@ -65,7 +65,7 @@ const saveIdempotencyResult = async ({
         resourceId,
       },
     },
-    { new: true, session, upsert: true, setDefaultsOnInsert: true }
+    { returnDocument: "after", session, upsert: true, setDefaultsOnInsert: true }
   );
 
   if (updated) {

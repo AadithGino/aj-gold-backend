@@ -103,7 +103,7 @@ const lockStaffCashProfile = async (staffUserId, session) => {
   const profile = await StaffProfile.findOneAndUpdate(
     { user: staffUserId },
     { $inc: { cashVersion: 1 } },
-    { new: true, session }
+    { returnDocument: "after", session }
   );
   if (!profile) {
     throw new ApiError(404, "Staff profile not found.");

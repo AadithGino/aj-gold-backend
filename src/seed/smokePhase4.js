@@ -3,7 +3,6 @@
  * Run: npm run smoke:phase4
  */
 const http = require("http");
-const jwt = require("jsonwebtoken");
 const bcrypt = require("bcryptjs");
 const mongoose = require("mongoose");
 const app = require("../app");
@@ -12,7 +11,8 @@ const { connectDb } = require("../config/db");
 const User = require("../models/user.model");
 const Customer = require("../models/customer.model");
 const Scheme = require("../models/scheme.model");
-const { USER_ROLES, SCHEME_STATUS } = require("../constants/enums");
+const { USER_ROLES, SCHEME_STATUS, PAYMENT_METHODS } = require("../constants/enums");
+const { collectPayment } = require("../services/payment.service");
 const {
   createCustomer,
   searchCustomers,
@@ -139,7 +139,8 @@ const run = async () => {
   const scheme = await createScheme(
     {
       customerId: customer._id.toString(),
-      startDate: new Date("2025-01-01"),
+      startDate: new Date(),
+      clientRequestId: clientRequestId(),
     },
     admin
   );
@@ -154,40 +155,75 @@ const run = async () => {
   }
   assert(secondActiveBlocked, "Second ACTIVE scheme blocked");
 
-  const redeemed = await updateSchemeStatus(
-    scheme._id,
+  await collectPayment(
     {
-      status: SCHEME_STATUS.REDEEMED,
-      notes: "Smoke redeem",
-      settlementAmount: 1,
+      customer: customer._id.toString(),
+      scheme: scheme._id.toString(),
+      amount: 1000,
+      paymentMethod: PAYMENT_METHODS.CASH,
       clientRequestId: clientRequestId(),
     },
     admin
   );
-  assert(redeemed.status === SCHEME_STATUS.REDEEMED, "Scheme status updated to REDEEMED");
+
+  const redeemed = await updateSchemeStatus(
+    scheme._id,
+    {
+      status: SCHEME_STATUS.CLOSED,
+      notes: "Smoke close",
+      payoutMethod: PAYMENT_METHODS.CASH,
+      clientRequestId: clientRequestId(),
+    },
+    admin
+  );
+  assert(redeemed.status === SCHEME_STATUS.CLOSED, "Scheme status updated to CLOSED");
   assert(
     redeemed.statusHistory.some(
       (entry) =>
-        entry.status === SCHEME_STATUS.REDEEMED &&
+        entry.status === SCHEME_STATUS.CLOSED &&
         (entry.changedBy?._id || entry.changedBy)?.toString() === admin._id.toString()
     ),
-    "statusHistory records actor for REDEEMED"
+    "statusHistory records actor for CLOSED"
   );
 
-  const scheme2 = await createScheme({ customerId: customer._id.toString(), startDate: new Date("2026-01-01") }, admin);
+  const scheme2 = await createScheme(
+    {
+      customerId: customer._id.toString(),
+      startDate: new Date(),
+      clientRequestId: clientRequestId(),
+    },
+    admin
+  );
+  await collectPayment(
+    {
+      customer: customer._id.toString(),
+      scheme: scheme2._id.toString(),
+      amount: 1000,
+      paymentMethod: PAYMENT_METHODS.CASH,
+      clientRequestId: clientRequestId(),
+    },
+    admin
+  );
   const closed = await updateSchemeStatus(
     scheme2._id,
     {
       status: SCHEME_STATUS.CLOSED,
       notes: "Smoke close",
-      settlementAmount: 1,
+      payoutMethod: PAYMENT_METHODS.CASH,
       clientRequestId: clientRequestId(),
     },
     admin
   );
   assert(closed.status === SCHEME_STATUS.CLOSED, "Scheme status updated to CLOEED");
 
-  const scheme3 = await createScheme({ customerId: customer._id.toString(), startDate: new Date("2026-02-01") }, admin);
+  const scheme3 = await createScheme(
+    {
+      customerId: customer._id.toString(),
+      startDate: new Date(),
+      clientRequestId: clientRequestId(),
+    },
+    admin
+  );
   let withdrawRejected = false;
   try {
     await updateSchemeStatus(
@@ -200,20 +236,27 @@ const run = async () => {
   }
   assert(withdrawRejected, "Legacy WITHDRAWN status is rejected");
 
-  const byPassbook = await searchCustomers(passbookNumber);
+  const byPassbook = await searchCustomers(passbookNumber, admin);
   assert(byPassbook.some((item) => item._id.toString() === customer._id.toString()), "Search by generated passbookNumber");
 
-  const byPhone = await searchCustomers(phone);
+  const byPhone = await searchCustomers(phone, admin);
   assert(byPhone.some((item) => item._id.toString() === customer._id.toString()), "Search by phone");
 
-  const byName = await searchCustomers("Smoke P4");
+  const byName = await searchCustomers("Smoke P4", admin);
   assert(byName.some((item) => item._id.toString() === customer._id.toString()), "Search by name");
 
   const server = app.listen(0);
   const port = server.address().port;
-  const adminToken = jwt.sign({ id: admin._id, role: admin.role }, env.jwtSecret, {
-    expiresIn: "1h",
+  const loginRes = await requestJson(port, {
+    method: "POST",
+    path: "/api/auth/login",
+    body: {
+      phone: admin.phone,
+      password: process.env.DEFAULT_ADMIN_PASSWORD || "admin123",
+    },
   });
+  assert(loginRes.status === 200, "Admin login succeeds for HTTP route checks");
+  const adminToken = loginRes.body?.data?.token;
 
   try {
     const createRes = await requestJson(port, {

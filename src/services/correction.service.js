@@ -367,7 +367,7 @@ const approveCorrection = async (correctionId, payload, actor) => {
           reviewClientRequestId: payload.reviewClientRequestId,
         },
       },
-      { new: false, session }
+      { returnDocument: "before", session }
     );
 
     if (!correction) {
@@ -589,7 +589,7 @@ const rejectCorrection = async (correctionId, payload, actor) => {
           reviewClientRequestId: payload.reviewClientRequestId,
         },
       },
-      { new: true, session }
+      { returnDocument: "after", session }
     );
 
     if (!correction) {

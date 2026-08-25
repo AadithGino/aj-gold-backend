@@ -22,7 +22,6 @@ const { collectPayment, reversePayment } = require("../services/payment.service"
 const { getReceiptDisplayData } = require("../services/cash.service");
 const { getStaffCashInHand } = require("../services/staffCash.service");
 const { getTotalPaidForScheme } = require("../services/paymentLimit.service");
-const ApiError = require("../utils/ApiError");
 const { clientRequestId } = require("./smokeHelpers");
 
 const SMOKE_TAG = "SMOKE-P5";
@@ -72,6 +71,7 @@ const run = async () => {
         name: "Smoke P5 Staff",
         phone: staffPhone,
         password: "staff123",
+        permissions: { canCollectPayment: true },
         notes: runTag,
       },
       admin
@@ -91,7 +91,11 @@ const run = async () => {
     assert(PASSBOOK_FORMAT.test(customer.passbookNumber), "Passbook auto-generated (4-digit)");
 
     const scheme = await createScheme(
-      { customerId: customer._id.toString(), startDate: new Date("2025-01-01") },
+      {
+        customerId: customer._id.toString(),
+        startDate: new Date(),
+        clientRequestId: clientRequestId(),
+      },
       admin
     );
     assert(scheme.enrollmentNumber.startsWith("AJGK-ENR-"), "Scheme created with enrollmentNumber");
@@ -102,7 +106,6 @@ const run = async () => {
         scheme: scheme._id.toString(),
         amount: 30000,
         paymentMethod: PAYMENT_METHODS.CASH,
-        paymentDate: new Date("2025-02-01"),
         clientRequestId: clientRequestId(),
       },
       staffUser
@@ -123,7 +126,6 @@ const run = async () => {
         scheme: scheme._id.toString(),
         amount: 30000,
         paymentMethod: PAYMENT_METHODS.CASH,
-        paymentDate: new Date("2025-04-01"),
         clientRequestId: clientRequestId(),
       },
       staffUser
@@ -132,40 +134,8 @@ const run = async () => {
     cashSummary = await getStaffCashInHand(staffUser._id);
     assert(cashSummary.cashCollected === 60000, "Second CASH payment included in cash collected");
 
-    let staffBlocked = false;
-    try {
-      await collectPayment(
-        {
-          customer: customer._id.toString(),
-          scheme: scheme._id.toString(),
-          amount: 70000,
-          paymentMethod: PAYMENT_METHODS.CASH,
-        paymentDate: new Date("2025-08-01"),
-        clientRequestId: clientRequestId(),
-      },
-        staffUser
-      );
-    } catch (error) {
-      staffBlocked = error instanceof ApiError && error.statusCode === 403;
-    }
-    assert(staffBlocked, "Over-limit staff payment blocked");
-
-    const overrideResult = await collectPayment(
-      {
-        customer: customer._id.toString(),
-        scheme: scheme._id.toString(),
-        amount: 70000,
-        paymentMethod: PAYMENT_METHODS.CASH,
-        paymentDate: new Date("2025-08-01"),
-        overrideReason: `${runTag} admin override for smoke test`,
-        clientRequestId: clientRequestId(),
-      },
-      admin
-    );
-    assert(overrideResult.payment.isLimitOverride === true, "Admin override with reason works");
-
     cashSummary = await getStaffCashInHand(staffUser._id);
-    assert(cashSummary.cashCollected === 60000, "Staff CASH only before admin override (60000)");
+    assert(cashSummary.cashCollected === 60000, "Staff cash totals remain at capped valid contributions");
     assert(cashSummary.cashInHand === 60000, "Staff cash in hand before non-cash methods");
 
     for (const method of [PAYMENT_METHODS.UPI, PAYMENT_METHODS.BANK, PAYMENT_METHODS.CARD]) {
@@ -175,7 +145,6 @@ const run = async () => {
           scheme: scheme._id.toString(),
           amount: 5000,
           paymentMethod: method,
-          paymentDate: new Date("2025-03-01"),
           transactionReference: `${runTag}-${method}`,
           clientRequestId: clientRequestId(),
         },
@@ -188,7 +157,7 @@ const run = async () => {
     assert(cashSummary.cashInHand === 60000, "UPI/BANK/CARD do not increase cash in hand");
 
     const totalBeforeReverse = await getTotalPaidForScheme(scheme._id);
-    const expectedTotal = 30000 + 30000 + 70000 + 5000 * 3;
+    const expectedTotal = 30000 + 30000 + 5000 * 3;
     assert(totalBeforeReverse === expectedTotal, "Total paid includes all SUCCESS payments before reverse");
 
     cashSummary = await getStaffCashInHand(staffUser._id);

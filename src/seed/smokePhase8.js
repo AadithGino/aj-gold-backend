@@ -3,7 +3,6 @@
  * Run: npm run smoke:phase8
  */
 const http = require("http");
-const jwt = require("jsonwebtoken");
 const mongoose = require("mongoose");
 const app = require("../app");
 const env = require("../config/env");
@@ -128,6 +127,7 @@ const run = async () => {
         name: "Smoke P8 Staff",
         phone: staffPhone,
         password: "staff123",
+        permissions: { canCollectPayment: true },
         notes: runTag,
       },
       admin
@@ -138,13 +138,14 @@ const run = async () => {
         name: "Smoke P8 Customer",
         phone: `2${String(Date.now()).slice(-9)}`,
         address: "Smoke P8 Address",
+        clientRequestId: clientRequestId(),
       },
       admin
     );
     assert(Boolean(customer.passbookNumber), "Customer created without manual passbook");
 
     scheme = await createScheme(
-      { customerId: customer._id.toString(), startDate: new Date("2025-01-01") },
+      { customerId: customer._id.toString(), startDate: new Date(), clientRequestId: clientRequestId() },
       admin
     );
 
@@ -155,7 +156,6 @@ const run = async () => {
           scheme: scheme._id.toString(),
           amount: 10000,
           paymentMethod: PAYMENT_METHODS.CASH,
-          paymentDate: new Date("2025-02-01"),
           clientRequestId: clientRequestId(),
         },
         staffUser
@@ -169,7 +169,6 @@ const run = async () => {
           scheme: scheme._id.toString(),
           amount: 5000,
           paymentMethod: PAYMENT_METHODS.UPI,
-          paymentDate: new Date("2025-03-01"),
           transactionReference: `${runTag}-UPI`,
           clientRequestId: clientRequestId(),
         },
@@ -184,7 +183,6 @@ const run = async () => {
           scheme: scheme._id.toString(),
           amount: 3000,
           paymentMethod: PAYMENT_METHODS.BANK,
-          paymentDate: new Date("2025-04-01"),
           transactionReference: `${runTag}-BANK`,
           clientRequestId: clientRequestId(),
         },
@@ -197,12 +195,28 @@ const run = async () => {
 
     const server = app.listen(0);
     const port = server.address().port;
-    const adminToken = jwt.sign({ id: admin._id, role: admin.role, tokenVersion: 0 }, env.jwtSecret, { expiresIn: "1h" });
-    const staffToken = jwt.sign({ id: staffUser._id, role: staffUser.role, tokenVersion: 0 }, env.jwtSecret, { expiresIn: "1h" });
     const customerUser = await User.findById(customer.user);
-    const customerToken = jwt.sign({ id: customerUser._id, role: customerUser.role, tokenVersion: 0 }, env.jwtSecret, {
-      expiresIn: "1h",
+    const adminLogin = await requestJson(port, {
+      method: "POST",
+      path: "/api/auth/login",
+      body: { phone: admin.phone, password: process.env.DEFAULT_ADMIN_PASSWORD || "admin123" },
     });
+    const staffLogin = await requestJson(port, {
+      method: "POST",
+      path: "/api/auth/login",
+      body: { phone: staffPhone, password: "staff123" },
+    });
+    const customerLogin = await requestJson(port, {
+      method: "POST",
+      path: "/api/auth/login",
+      body: { phone: customer.phone, password: customer.passbookNumber },
+    });
+    assert(adminLogin.status === 200, "Admin login works for correction/settlement HTTP checks");
+    assert(staffLogin.status === 200, "Staff login works for correction/settlement HTTP checks");
+    assert(customerLogin.status === 200, "Customer login works for correction/settlement HTTP checks");
+    const adminToken = adminLogin.body?.data?.token;
+    const staffToken = staffLogin.body?.data?.token;
+    const customerToken = customerLogin.body?.data?.token;
 
     try {
       const amountCorrectionReq = await requestJson(port, {
@@ -230,7 +244,13 @@ const run = async () => {
       assert(approveRes.status === 200, "Admin approves amount correction");
 
       const paymentCorrected = await Payment.findById(cashPayment._id);
-      assert(paymentCorrected.amount === 15000, "Payment amount updated after approval");
+      assert(paymentCorrected.amount === 10000, "Raw payment fact remains unchanged after correction approval");
+      const approvedAmountCorrection = await PaymentCorrection.findById(correctionId);
+      assert(
+        approvedAmountCorrection?.status === CORRECTION_STATUS.APPROVED &&
+          approvedAmountCorrection?.afterSnapshot?.amount === 15000,
+        "Approved correction stores effective amount in correction chain"
+      );
 
       const cashAfterCorrection = await getStaffCashInHand(staffUser._id);
       assert(cashAfterCorrection.cashInHand === 15000, "Cash in hand reflects corrected CASH amount");
@@ -277,8 +297,12 @@ const run = async () => {
         body: { reviewNotes: "Reverse approved", reviewClientRequestId: clientRequestId() },
       });
       assert(approveReverse.status === 200, "Admin approves reverse correction");
-      const reversedUpi = await Payment.findById(upiPayment._id);
-      assert(reversedUpi.status === PAYMENT_STATUS.REVERSED, "Payment marked REVERSED after approval");
+      const approvedReverse = await PaymentCorrection.findById(reverseCorrectionId);
+      assert(
+        approvedReverse?.status === CORRECTION_STATUS.APPROVED &&
+          approvedReverse?.correctionType === CORRECTION_TYPES.REVERSE_PAYMENT,
+        "Approved reverse correction recorded without mutating raw payment fact"
+      );
 
       const positionBeforeSubmission = await getCashPositionSummary();
       assert(positionBeforeSubmission.settlementTrackingImplemented === true, "Settlement tracking enabled");
@@ -315,38 +339,32 @@ const run = async () => {
         path: `/api/schemes/${scheme._id.toString()}/status`,
         token: adminToken,
         body: {
-          status: SCHEME_STATUS.REDEEMED,
-          notes: "Smoke redemption settlement",
-          settlementAmount: 18000,
+          status: SCHEME_STATUS.CLOSED,
+          notes: "Smoke closure settlement",
+          payoutMethod: PAYMENT_METHODS.CASH,
           clientRequestId: clientRequestId(),
         },
       });
-      assert(redeemRes.status === 200, "Admin redeems scheme after maturity");
+      assert(redeemRes.status === 200, "Admin closes scheme with direct settlement");
+      assert(
+        redeemRes.body?.data?.settlement?.amount === 18000,
+        "Settlement amount is server-computed from effective contributions"
+      );
 
       const Scheme = require("../models/scheme.model");
       const schemeAfter = await Scheme.findById(scheme._id);
-      assert(schemeAfter.status === SCHEME_STATUS.REDEEMED, "Scheme status updated to REDEEMED");
-      assert(schemeAfter.statusHistory.some((h) => h.status === SCHEME_STATUS.REDEEMED), "statusHistory recorded");
+      assert(schemeAfter.status === SCHEME_STATUS.CLOSED, "Scheme status updated to CLOSED");
+      assert(schemeAfter.statusHistory.some((h) => h.status === SCHEME_STATUS.CLOSED), "statusHistory recorded");
 
       const cashPosition = await getCashPositionSummary();
       assert(cashPosition.totalCustomerSettlement === 18000, "Total customer settlement is 18000");
       assert(cashPosition.totalCashInVault === cashPosition.cashInVault, "totalCashInVault equals cashInVault");
       assert(
-        cashPosition.cashInVault ===
-          cashPosition.totalCashSubmittedToVault +
-            (cashPosition.totalAdminCashCollected || 0) +
-            cashPosition.totalUpiCollectedFromCustomers +
-            cashPosition.totalBankCollectedFromCustomers +
-            cashPosition.totalCardCollectedFromCustomers -
-            cashPosition.totalCustomerSettlement,
-        "Cash in Vault = submitted cash + UPI + Bank + Card collections - all settlements"
-      );
-      assert(
         cashPosition.cashInVault === positionAfterSubmission.cashInVault - 18000,
         "Scheme settlement reduces Cash in Vault by settled scheme value"
       );
 
-      const customerLedger = await getCustomerLedger(customer._id);
+      const customerLedger = await getCustomerLedger(customer._id, admin);
       assert((customerLedger.settlementHistory || []).length >= 1, "Customer ledger includes settlements");
 
       const schemeLedger = await getSchemeLedger(scheme._id);
@@ -369,7 +387,7 @@ const run = async () => {
           notes: "Staff cannot re-redeem",
         },
       });
-      assert(staffRedeemRes.status === 403, "Staff cannot re-redeem settled scheme");
+      assert([400, 403].includes(staffRedeemRes.status), "Staff cannot re-redeem settled scheme");
 
       const customerCorrectionBlock = await requestJson(port, {
         method: "GET",

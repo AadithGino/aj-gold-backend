@@ -33,7 +33,6 @@ const { createScheme, updateSchemeStatus } = require("../services/schemeManageme
 const { collectPayment } = require("../services/payment.service");
 const { createCashSubmission } = require("../services/cash.service");
 const { getStaffCashInHand } = require("../services/staffCash.service");
-const { getTotalPaidForScheme } = require("../services/paymentLimit.service");
 const { clientRequestId } = require("./smokeHelpers");
 const { getCashPositionSummary } = require("../services/cashPosition.service");
 const { getAdminDashboard } = require("../services/dashboard.service");
@@ -407,13 +406,12 @@ const run = async () => {
   for (const customerKey of REDEMPTION_CUSTOMER_KEYS) {
     const customer = customerRecords[customerKey];
     const scheme = schemeRecords[customerKey];
-    const totalPaid = await getTotalPaidForScheme(scheme._id);
     await updateSchemeStatus(
       scheme._id,
       {
         status: "REDEEMED",
         notes: "Cash vault demo redemption",
-        settlementAmount: totalPaid,
+        payoutMethod: PAYMENT_METHODS.CASH,
         clientRequestId: clientRequestId(),
       },
       admin
