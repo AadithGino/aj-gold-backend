@@ -7,6 +7,27 @@
 - Indexes verified: `npm run verify:indexes`
 - Production env vars set (see `.env.example`)
 
+## Financial journal DB permissions
+
+- Application runtime credential:
+  - may `find` and `insert` on `financialjournals`
+  - must not have `update`, `findAndModify`, `remove`, `delete`, or `replace` capabilities on `financialjournals`
+- Migration/index administration must run with a separate restricted deployment credential used only for deployment operations.
+- Do not reuse the migration/index credential as the normal application runtime credential.
+
+### Operator role verification before deployment
+
+1. Authenticate to MongoDB with the intended runtime app user (non-admin deployment shell).
+2. Run a role-introspection check and confirm that `financialjournals` grants only read/insert-style actions to the runtime user.
+3. Validate by policy that update/replace/delete-style actions are not present for `financialjournals`.
+4. Re-authenticate with the migration/index deployment credential and confirm that elevated DDL/administrative actions are isolated to deployment execution.
+5. Record the verification result in the release checklist before running `npm run migrate` and `npm run verify:indexes`.
+
+Example verification commands (replace placeholders with your own non-secret values):
+
+- `db.runCommand({ usersInfo: "<app-user>", showPrivileges: true })`
+- `db.runCommand({ connectionStatus: 1, showPrivileges: true })`
+
 ## Release steps
 
 1. Set `NODE_ENV=production`
