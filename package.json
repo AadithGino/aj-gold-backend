@@ -33,7 +33,8 @@
     "smoke:phase6": "node src/seed/smokePhase6.js",
     "smoke:phase7": "node src/seed/smokePhase7.js",
     "smoke:phase8": "node src/seed/smokePhase8.js",
-    "ci": "npm ci --ignore-scripts && npm test && npm run migrate:verify && npm audit --omit=dev --audit-level=high"
+    "ci": "npm ci --ignore-scripts && npm test && npm run migrate:verify && npm audit --omit=dev --audit-level=high",
+    "package:release": "node scripts/package-final-archive.js"
   },
   "dependencies": {
     "bcryptjs": "^3.0.3",
