@@ -7,6 +7,7 @@ const {
   staffCashSubmissionsHandler,
   staffRedemptionHistoryHandler,
   customerDashboardHandler,
+  customerRedemptionHistoryHandler,
   roleProfileHandler,
 } = require("../controllers/dashboard.controller");
 const ApiError = require("../utils/ApiError");
@@ -31,6 +32,10 @@ router.get("/staff/cash-submissions", (req, res, next) => {
 router.get("/staff/redemptions", (req, res, next) => {
   if (![USER_ROLES.ADMIN, USER_ROLES.STAFF].includes(req.user.role)) return next(new ApiError(403, "Staff/Admin only."));
   staffRedemptionHistoryHandler(req, res, next);
+});
+router.get("/customer/redemptions", (req, res, next) => {
+  if (req.user.role !== USER_ROLES.CUSTOMER) return next(new ApiError(403, "Customer only."));
+  customerRedemptionHistoryHandler(req, res, next);
 });
 router.get("/customer", (req, res, next) => {
   if (req.user.role !== USER_ROLES.CUSTOMER) return next(new ApiError(403, "Customer only."));

@@ -13,6 +13,7 @@ const {
   updateCustomerHandler,
   resetCustomerPasswordHandler,
   getCustomerSchemesHandler,
+  getCustomerRedemptionsHandler,
 } = require("../controllers/customer.controller");
 
 const router = express.Router();
@@ -22,6 +23,7 @@ router.use(adminOrStaffMiddleware);
 
 router.get("/", staffPermissionAnyMiddleware(["canCollectPayment"]), listCustomersHandler);
 router.get("/:customerId/schemes", staffPermissionAnyMiddleware(["canCollectPayment"]), getCustomerSchemesHandler);
+router.get("/:customerId/redemptions", staffPermissionAnyMiddleware(["canCollectPayment"]), getCustomerRedemptionsHandler);
 router.get("/:customerId", staffPermissionAnyMiddleware(["canCollectPayment"]), getCustomerHandler);
 
 router.post("/", staffPermissionMiddleware("canCreateCustomer"), createCustomerHandler);

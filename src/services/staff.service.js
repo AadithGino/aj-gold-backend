@@ -316,7 +316,7 @@ const listStaff = async ({ search = "", cursor, limit } = {}) => {
 
   return buildCursorPage(items, {
     limit: resolvedLimit,
-    getCursorValue: (row) => ({ createdAt: row.createdAt, _id: row._id }),
+    getCursorValue: (row) => ({ createdAt: row.createdAt, _id: row.staffUserId }),
   });
 };
 

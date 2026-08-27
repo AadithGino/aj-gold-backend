@@ -29,6 +29,7 @@ const {
   enrichPaymentsWithEffectiveView,
   applyEffectivePaymentRow,
 } = require("../utils/effectiveReadModel");
+const { parseCursorPagination, buildCursorPage } = require("../utils/pagination");
 
 const APP_VERSION = "v1.0.0";
 
@@ -558,6 +559,128 @@ const getStaffCashSubmissions = async (user, { from, to } = {}) => {
   };
 };
 
+const mapCustomerRedemptionRow = (scheme, customer) => {
+  const status = scheme?.status;
+  const statusEntry = (scheme.statusHistory || []).find((entry) => entry.status === status);
+  const changedAt =
+    scheme.settlement?.settledAt ||
+    statusEntry?.changedAt ||
+    scheme.updatedAt ||
+    scheme.maturityDate;
+  const changedBy = statusEntry?.changedBy;
+
+  return {
+    _id: String(scheme._id),
+    schemeId: scheme._id,
+    schemeName: scheme.schemeName,
+    enrollmentNumber: scheme.enrollmentNumber,
+    status,
+    changedAt,
+    redeemedAt: changedAt,
+    notes: scheme.settlement?.notes || statusEntry?.notes || "",
+    settlementRef:
+      scheme.settlement?.settlementReceiptId || scheme.settlement?.payoutReference || "",
+    redeemedBy: changedBy
+      ? {
+          _id: changedBy._id || changedBy,
+          name: changedBy.name || "",
+          role: changedBy.role || null,
+        }
+      : null,
+    customer: {
+      name: customer?.name || "",
+      passbookNumber: customer?.passbookNumber || "",
+    },
+  };
+};
+
+const getCustomerRedemptionHistory = async (customerId, { from, to, cursor, limit } = {}) => {
+  const customer = await Customer.findById(customerId).lean();
+  if (!customer) {
+    throw new ApiError(404, "Customer profile not found.");
+  }
+
+  const customRange = parseDateRange(from, to);
+  if (customRange.error) {
+    throw new ApiError(400, customRange.error);
+  }
+
+  const { limit: resolvedLimit, cursor: decodedCursor } = parseCursorPagination(
+    { cursor, limit },
+    { maxLimit: 100, defaultLimit: 30 }
+  );
+
+  if (
+    decodedCursor &&
+    (decodedCursor.changedAt == null || decodedCursor._id == null)
+  ) {
+    throw new ApiError(400, "Invalid cursor.");
+  }
+
+  const schemes = await Scheme.find({
+    customer: customer._id,
+    status: { $in: [SCHEME_STATUS.REDEEMED, SCHEME_STATUS.CLOSED] },
+  })
+    .populate("statusHistory.changedBy", "name role")
+    .lean();
+
+  const allItems = schemes
+    .map((scheme) => mapCustomerRedemptionRow(scheme, customer))
+    .filter((row) => {
+      const changedAt = new Date(row.changedAt).getTime();
+      if (Number.isNaN(changedAt)) return false;
+      if (customRange.from && changedAt < customRange.from.getTime()) return false;
+      if (customRange.to && changedAt > customRange.to.getTime()) return false;
+      return true;
+    })
+    .sort((a, b) => {
+      const delta = new Date(b.changedAt) - new Date(a.changedAt);
+      if (delta !== 0) return delta;
+      return String(b._id).localeCompare(String(a._id));
+    });
+
+  let window = allItems;
+  if (decodedCursor) {
+    const cursorTime = new Date(decodedCursor.changedAt).getTime();
+    window = allItems.filter((row) => {
+      const t = new Date(row.changedAt).getTime();
+      if (t < cursorTime) return true;
+      if (t > cursorTime) return false;
+      return String(row._id) < String(decodedCursor._id);
+    });
+  }
+
+  const page = buildCursorPage(window, {
+    limit: resolvedLimit,
+    getCursorValue: (row) => ({
+      changedAt: row.changedAt,
+      _id: row._id,
+    }),
+  });
+
+  return {
+    items: page.items,
+    pageInfo: page.pageInfo,
+    total: allItems.length,
+    summary: { count: allItems.length },
+    range: {
+      from: customRange.from || null,
+      to: customRange.to || null,
+    },
+  };
+};
+
+const getOwnCustomerRedemptionHistory = async (user, filters = {}) => {
+  if (user.role !== USER_ROLES.CUSTOMER) {
+    throw new ApiError(403, "Customer only.");
+  }
+  const customer = await Customer.findOne({ user: user._id }).lean();
+  if (!customer) {
+    throw new ApiError(404, "Customer profile not found.");
+  }
+  return getCustomerRedemptionHistory(customer._id, filters);
+};
+
 const getStaffRedemptionHistory = async (user, { from, to } = {}) => {
   if (![USER_ROLES.ADMIN, USER_ROLES.STAFF].includes(user.role)) {
     throw new ApiError(403, "Staff/Admin only.");
@@ -629,4 +752,6 @@ module.exports = {
   getRoleProfile,
   getStaffCashSubmissions,
   getStaffRedemptionHistory,
+  getCustomerRedemptionHistory,
+  getOwnCustomerRedemptionHistory,
 };

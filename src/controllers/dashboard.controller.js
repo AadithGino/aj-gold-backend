@@ -5,6 +5,7 @@ const {
   getRoleProfile,
   getStaffCashSubmissions,
   getStaffRedemptionHistory,
+  getOwnCustomerRedemptionHistory,
 } = require("../services/dashboard.service");
 const { USER_ROLES } = require("../constants/enums");
 const ApiError = require("../utils/ApiError");
@@ -42,6 +43,20 @@ const customerDashboardHandler = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
+const customerRedemptionHistoryHandler = async (req, res, next) => {
+  try {
+    const data = await getOwnCustomerRedemptionHistory(req.user, {
+      from: req.query.from,
+      to: req.query.to,
+      cursor: req.query.cursor,
+      limit: req.query.limit,
+    });
+    res.json({ success: true, data });
+  } catch (err) {
+    next(err);
+  }
+};
+
 const staffRedemptionHistoryHandler = async (req, res, next) => {
   try {
     const data = await getStaffRedemptionHistory(req.user, {
@@ -67,5 +82,6 @@ module.exports = {
   staffCashSubmissionsHandler,
   staffRedemptionHistoryHandler,
   customerDashboardHandler,
+  customerRedemptionHistoryHandler,
   roleProfileHandler,
 };
