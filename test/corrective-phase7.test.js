@@ -118,19 +118,24 @@ describe("Corrective Phase 7 — release packaging and contract freeze", () => {
         }
       }
       run("git", ["add", "--", ...PACKAGING_FILES], { cwd: cloneDir });
-      run(
-        "git",
-        [
-          "-c",
-          "user.name=Packaging Test",
-          "-c",
-          "user.email=packaging-test@local",
-          "commit",
-          "-m",
-          "test: packaging contract",
-        ],
-        { cwd: cloneDir }
-      );
+      const packagingDirty = run("git", ["status", "--porcelain", "--", ...PACKAGING_FILES], {
+        cwd: cloneDir,
+      }).trim();
+      if (packagingDirty) {
+        run(
+          "git",
+          [
+            "-c",
+            "user.name=Packaging Test",
+            "-c",
+            "user.email=packaging-test@local",
+            "commit",
+            "-m",
+            "test: packaging contract",
+          ],
+          { cwd: cloneDir }
+        );
+      }
 
       const cloneHead = run("git", ["rev-parse", "HEAD"], { cwd: cloneDir }).trim();
       const short = cloneHead.slice(0, 7);

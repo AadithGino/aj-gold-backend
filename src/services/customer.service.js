@@ -45,20 +45,31 @@ const sanitizeCollectionCustomer = (customer) => ({
   status: customer.status,
 });
 
+const sanitizeCollectionScheme = (scheme) => {
+  if (!scheme) return null;
+  return {
+    _id: scheme._id,
+    enrollmentNumber: scheme.enrollmentNumber,
+    schemeName: scheme.schemeName || "",
+    status: scheme.status,
+    startDate: scheme.startDate,
+    sixMonthDate: scheme.sixMonthDate,
+    maturityDate: scheme.maturityDate,
+    totalPaid: scheme.totalPaid,
+    firstSixMonthsPaid: scheme.firstSixMonthsPaid,
+    afterSixMonthsPaid: scheme.afterSixMonthsPaid,
+    remainingAllowedPayment: scheme.remainingAllowedPayment,
+    paymentCount: scheme.paymentCount,
+    inFirstSixMonths: scheme.inFirstSixMonths,
+    isMatured: scheme.isMatured,
+    limitFullyUsed: scheme.limitFullyUsed,
+    progress: scheme.progress,
+  };
+};
+
 const sanitizeCollectionSearchItem = (item) => ({
   ...sanitizeCollectionCustomer(item),
-  activeScheme: item.activeScheme
-    ? {
-        _id: item.activeScheme._id,
-        enrollmentNumber: item.activeScheme.enrollmentNumber,
-        status: item.activeScheme.status,
-        totalPaid: item.activeScheme.totalPaid,
-        remainingAllowedPayment: item.activeScheme.remainingAllowedPayment,
-        paymentCount: item.activeScheme.paymentCount,
-        inFirstSixMonths: item.activeScheme.inFirstSixMonths,
-        limitFullyUsed: item.activeScheme.limitFullyUsed,
-      }
-    : null,
+  activeScheme: sanitizeCollectionScheme(item.activeScheme),
 });
 
 const normalizeActor = (actor) => {
@@ -165,6 +176,13 @@ const enrichScheme = async (scheme) => {
   const statusHistory = mapStatusHistory(scheme.statusHistory || []);
   const redeemedEvent = getLatestStatusEvent(statusHistory, SCHEME_STATUS.REDEEMED);
   const closedEvent = getLatestStatusEvent(statusHistory, SCHEME_STATUS.CLOSED);
+  const now = new Date();
+  const inFirstSixMonths = isInFirstPeriod(scheme, now);
+  const isMatured = now >= new Date(scheme.maturityDate);
+  const limitFullyUsed =
+    !inFirstSixMonths &&
+    limitSummary.firstSixMonthsPaid > 0 &&
+    limitSummary.remainingAllowedPayment <= 0;
 
   return {
     _id: scheme._id,
@@ -186,6 +204,9 @@ const enrichScheme = async (scheme) => {
     firstSixMonthsPaid: limitSummary.firstSixMonthsPaid,
     afterSixMonthsPaid: limitSummary.afterSixMonthsPaid,
     remainingAllowedPayment: limitSummary.remainingAllowedPayment,
+    inFirstSixMonths,
+    isMatured,
+    limitFullyUsed,
     settlement: scheme.settlement
       ? {
           amount: scheme.settlement.amount,
@@ -531,16 +552,9 @@ const searchCustomers = async (search = "", actor = null, options = {}) => {
       if (activeSchemeDoc) {
         activeScheme = await enrichScheme(activeSchemeDoc);
         const paymentCount = effectiveEntriesByScheme.get(String(activeSchemeDoc._id)) || 0;
-        const now = new Date();
-        const inFirstSixMonths = isInFirstPeriod(activeSchemeDoc, now);
         activeScheme = {
           ...activeScheme,
           paymentCount,
-          inFirstSixMonths,
-          limitFullyUsed:
-            !inFirstSixMonths &&
-            activeScheme.firstSixMonthsPaid > 0 &&
-            activeScheme.remainingAllowedPayment <= 0,
         };
       }
 
@@ -631,16 +645,7 @@ const getCustomerDetail = async (customerId, actor = null, options = {}) => {
   if (accessMode === "collection" && !forceFull) {
     return {
       customer: sanitizeCollectionCustomer(customer),
-      activeScheme: grouped.active
-        ? {
-            _id: grouped.active._id,
-            enrollmentNumber: grouped.active.enrollmentNumber,
-            status: grouped.active.status,
-            totalPaid: grouped.active.totalPaid,
-            remainingAllowedPayment: grouped.active.remainingAllowedPayment,
-            progress: grouped.active.progress,
-          }
-        : null,
+      activeScheme: sanitizeCollectionScheme(grouped.active),
     };
   }
 
@@ -679,14 +684,7 @@ const getCustomerSchemes = async (customerId, actor = null) => {
   if (accessMode === "collection") {
     return enriched
       .filter((scheme) => scheme.status === SCHEME_STATUS.ACTIVE)
-      .map((scheme) => ({
-        _id: scheme._id,
-        enrollmentNumber: scheme.enrollmentNumber,
-        status: scheme.status,
-        totalPaid: scheme.totalPaid,
-        remainingAllowedPayment: scheme.remainingAllowedPayment,
-        progress: scheme.progress,
-      }));
+      .map((scheme) => sanitizeCollectionScheme(scheme));
   }
 
   return enriched;

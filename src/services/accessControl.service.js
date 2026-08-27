@@ -4,6 +4,7 @@ const ApiError = require("../utils/ApiError");
 const {
   resolveStaffPermissions,
   hasStaffPermission,
+  CUSTOMER_LOOKUP_PERMISSIONS,
 } = require("../constants/staffPermissions");
 
 const loadStaffProfile = async (actor) => {
@@ -65,7 +66,8 @@ const getCustomerAccessMode = async (actor, staffProfile = null) => {
   }
 
   const permissions = resolveStaffPermissions(profile.permissions);
-  if (permissions.canCollectPayment) {
+  const canLookup = CUSTOMER_LOOKUP_PERMISSIONS.some((key) => permissions[key] === true);
+  if (canLookup) {
     return "collection";
   }
 

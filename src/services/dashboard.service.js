@@ -18,7 +18,7 @@ const {
   getStaffCashSubmissionHistory,
 } = require("./cash.service");
 const { getStaffCashInHand } = require("./staffCash.service");
-const { resolveStaffPermissions } = require("../constants/staffPermissions");
+const { resolveStaffPermissions, hasStaffPermission } = require("../constants/staffPermissions");
 const { getCashPositionSummary } = require("./cashPosition.service");
 const { enrichScheme } = require("./customer.service");
 const { getSchemeLimitSummary } = require("./paymentLimit.service");
@@ -311,7 +311,7 @@ const getStaffDashboard = async (user) => {
       name: user.name,
       phone: user.phone,
       role: user.role,
-      permissions: staffProfile?.permissions || {},
+      permissions: resolveStaffPermissions(staffProfile?.permissions),
       calculatedCashInHand: cashSummary.cashInHand,
     },
     calculatedCashInHand: cashSummary.cashInHand,
@@ -343,14 +343,16 @@ const getStaffDashboard = async (user) => {
       .map(({ payment, latest }) =>
         mapPaymentItem(payment, applyEffectivePaymentRow(payment, latest))
       ),
-    recentCashSubmissions: recentCashSubmissions.map((row) => ({
-      _id: row._id,
-      submittedAmount: row.submittedAmount || 0,
-      submissionDate: row.submissionDate,
-      receivedBy: row.receivedBy || "Admin",
-      notes: row.notes || "",
-      createdAt: row.createdAt,
-    })),
+    recentCashSubmissions: hasStaffPermission(staffProfile, "canSubmitCash")
+      ? recentCashSubmissions.map((row) => ({
+          _id: row._id,
+          submittedAmount: row.submittedAmount || 0,
+          submissionDate: row.submissionDate,
+          receivedBy: row.receivedBy || "Admin",
+          notes: row.notes || "",
+          createdAt: row.createdAt,
+        }))
+      : [],
     recentRedemptions: recentRedemptionSchemes.items || [],
     lastSyncedAt: now,
   };
@@ -502,6 +504,13 @@ const getRoleProfile = async (user) => {
 const getStaffCashSubmissions = async (user, { from, to } = {}) => {
   if (![USER_ROLES.ADMIN, USER_ROLES.STAFF].includes(user.role)) {
     throw new ApiError(403, "Staff/Admin only.");
+  }
+
+  if (user.role === USER_ROLES.STAFF) {
+    const profile = await StaffProfile.findOne({ user: user._id });
+    if (!hasStaffPermission(profile, "canSubmitCash")) {
+      throw new ApiError(403, "Staff does not have cash submission access.");
+    }
   }
 
   const customRange = parseDateRange(from, to);

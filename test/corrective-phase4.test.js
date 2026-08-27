@@ -132,8 +132,8 @@ describe("Corrective Phase 4 — authorization, MFA, CORS, privacy", () => {
     delete require.cache[require.resolve("../src/config/env")];
   });
 
-  it("staff without canCollectPayment cannot list customers", async () => {
-    const staff = await createStaffWithPermissions({ canCreateCustomer: true });
+  it("staff without customer lookup permissions cannot list customers", async () => {
+    const staff = await createStaffWithPermissions({ canViewReports: true });
     const token = signAccessToken(staff);
     const res = await httpRequest({ method: "GET", path: "/api/customers?search=test", token });
     assert.equal(res.status, 403);

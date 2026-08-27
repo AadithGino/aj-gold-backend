@@ -10,6 +10,15 @@ const DEFAULT_STAFF_PERMISSIONS = {
 
 const STAFF_PERMISSION_KEYS = Object.keys(DEFAULT_STAFF_PERMISSIONS);
 
+/** Existing keys that may look up a customer/scheme to complete an approved workflow. */
+const CUSTOMER_LOOKUP_PERMISSIONS = [
+  "canCollectPayment",
+  "canCreateCustomer",
+  "canFinalizeSettlement",
+  "canMarkRedeemed",
+  "canMarkClosed",
+];
+
 const resolveStaffPermissions = (permissions = {}) => {
   const stored = permissions?.toObject?.() || permissions || {};
   const merged = { ...DEFAULT_STAFF_PERMISSIONS, ...stored };
@@ -27,6 +36,7 @@ const hasStaffPermission = (profile, permissionKey) => {
 module.exports = {
   DEFAULT_STAFF_PERMISSIONS,
   STAFF_PERMISSION_KEYS,
+  CUSTOMER_LOOKUP_PERMISSIONS,
   resolveStaffPermissions,
   hasStaffPermission,
 };
