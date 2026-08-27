@@ -469,6 +469,30 @@ const getSchemeReport = async (filters = {}) => {
     defaultLimit: 50,
   });
 
+  const scopeToken = JSON.stringify({
+    status: filters.status || null,
+    from: range.from ? range.from.toISOString() : null,
+    to: range.to ? range.to.toISOString() : null,
+    maturityFrom: matRange.from ? matRange.from.toISOString() : null,
+    maturityTo: matRange.to ? matRange.to.toISOString() : null,
+    search: filters.search?.trim() || null,
+  });
+
+  if (decodedCursor) {
+    if (
+      typeof decodedCursor !== "object" ||
+      !decodedCursor._id ||
+      decodedCursor.maturityDate == null ||
+      decodedCursor.createdAt == null ||
+      typeof decodedCursor.scope !== "string"
+    ) {
+      throw new ApiError(400, "Invalid cursor.");
+    }
+    if (decodedCursor.scope !== scopeToken) {
+      throw new ApiError(400, "Cursor does not match the current scope.");
+    }
+  }
+
   if (filters.search?.trim()) {
     const term = parseSafeSearchTerm(filters.search, { label: "search" });
     const customers = await Customer.find({
@@ -541,6 +565,7 @@ const getSchemeReport = async (filters = {}) => {
       maturityDate: row.maturityDate,
       createdAt: row.createdAt,
       _id: row.schemeId,
+      scope: scopeToken,
     }),
   });
 

@@ -221,7 +221,7 @@ const packageRelease = () => {
       node: nodeVersion,
       npm: npmVersion,
       packageLockSha256,
-      migrationRange: "001–011",
+      migrationRange: "001–012",
       deploymentOccurred: false,
     };
     fs.writeFileSync(sidecarPath, `${JSON.stringify(sidecar, null, 2)}\n`);

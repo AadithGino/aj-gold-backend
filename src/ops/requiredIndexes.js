@@ -92,8 +92,17 @@ const REQUIRED_INDEXES = [
   },
   {
     collection: "schemes",
-    key: { status: 1, "settlement.settledAt": -1 },
-    label: "schemes by status/settlement date",
+    key: { customer: 1, status: 1, "settlement.settledAt": -1, _id: -1 },
+    name: "schemes_customer_terminal_settledAt",
+    partial: { status: { $in: [SCHEME_STATUS.REDEEMED, SCHEME_STATUS.CLOSED] } },
+    label: "customer terminal settlements by date",
+  },
+  {
+    collection: "schemes",
+    key: { "settlement.settledBy": 1, status: 1, "settlement.settledAt": -1, _id: -1 },
+    name: "schemes_settledBy_terminal_settledAt",
+    partial: { status: { $in: [SCHEME_STATUS.REDEEMED, SCHEME_STATUS.CLOSED] } },
+    label: "staff terminal settlements by date",
   },
   {
     collection: "schemes",

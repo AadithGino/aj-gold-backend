@@ -387,6 +387,15 @@ const listPayments = async (
   { customerId, schemeId, staffId, from, to, method, limit, cursor } = {},
   actor = null
 ) => {
+  if (actor?.role === USER_ROLES.CUSTOMER) {
+    const own = await Customer.findOne({ user: actor._id }).select("_id");
+    if (!own) {
+      throw new ApiError(404, "Customer profile not found.");
+    }
+    customerId = String(own._id);
+    staffId = undefined;
+  }
+
   const customRange = parseDateRange(from, to);
   if (customRange.error) {
     throw new ApiError(400, customRange.error);

@@ -33,8 +33,12 @@ const createCorrectionHandler = asyncHandler(async (req, res) => {
 });
 
 const listCorrectionsHandler = asyncHandler(async (req, res) => {
-  const data = await listCorrections(req.query, req.user);
-  res.json({ success: true, data: { items: data } });
+  const result = await listCorrections(req.query, req.user);
+  res.json({
+    success: true,
+    data: { items: result.items, summary: result.summary },
+    pageInfo: result.pageInfo,
+  });
 });
 
 const getCorrectionHandler = asyncHandler(async (req, res) => {

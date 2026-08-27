@@ -3,7 +3,6 @@ const mongoose = require("mongoose");
 const { DEFAULT_STAFF_PERMISSIONS } = require("../constants/staffPermissions");
 const User = require("../models/user.model");
 const StaffProfile = require("../models/staffProfile.model");
-const Scheme = require("../models/scheme.model");
 const {
   USER_ROLES,
   USER_STATUS,
@@ -33,6 +32,7 @@ const {
 } = require("../utils/date");
 const { parseSafeSearchTerm } = require("../utils/safeSearch");
 const { parseCursorPagination, buildCursorPage } = require("../utils/pagination");
+const { listSettlementHistory } = require("./settlementHistory.service");
 
 const sanitizeStaffUser = (user) => ({
   _id: user._id,
@@ -446,49 +446,25 @@ const getStaffCashSummary = async (staffUserId, { from, to } = {}) => {
   };
 };
 
-const getStaffRedeemedClosedHistory = async (staffUserId) => {
+const getStaffRedeemedClosedHistory = async (staffUserId, filters = {}) => {
   await getStaffContextOrThrow(staffUserId);
-
-  const schemes = await Scheme.find({
-    "statusHistory.changedBy": staffUserId,
-  })
-    .populate("customer", "name passbookNumber phone")
-    .sort({ updatedAt: -1 });
-
-  const redeemed = [];
-  const closed = [];
-
-  schemes.forEach((scheme) => {
-    scheme.statusHistory
-      .filter((entry) => entry.changedBy?.toString() === staffUserId.toString())
-      .forEach((entry) => {
-        const item = {
-          schemeId: scheme._id,
-          enrollmentNumber: scheme.enrollmentNumber,
-          schemeName: scheme.schemeName,
-          schemeStatus: scheme.status,
-          customer: scheme.customer
-            ? {
-                _id: scheme.customer._id,
-                name: scheme.customer.name,
-                passbookNumber: scheme.customer.passbookNumber,
-                phone: scheme.customer.phone,
-              }
-            : null,
-          status: entry.status,
-          changedAt: entry.changedAt,
-          notes: entry.notes || "",
-        };
-
-        if (entry.status === SCHEME_STATUS.REDEEMED) {
-          redeemed.push(item);
-        } else if (entry.status === SCHEME_STATUS.CLOSED) {
-          closed.push(item);
-        }
-      });
+  const page = await listSettlementHistory({
+    settledBy: staffUserId,
+    includeCustomer: true,
+    from: filters.from,
+    to: filters.to,
+    cursor: filters.cursor,
+    limit: filters.limit,
   });
 
-  return { redeemed, closed };
+  return {
+    items: page.items,
+    pageInfo: page.pageInfo,
+    summary: page.summary,
+    range: page.range,
+    redeemed: page.items.filter((row) => row.status === SCHEME_STATUS.REDEEMED),
+    closed: page.items.filter((row) => row.status === SCHEME_STATUS.CLOSED),
+  };
 };
 
 module.exports = {

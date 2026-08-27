@@ -1,3 +1,4 @@
+const mongoose = require("mongoose");
 const PaymentCorrection = require("../models/paymentCorrection.model");
 const Payment = require("../models/payment.model");
 const Scheme = require("../models/scheme.model");
@@ -17,6 +18,7 @@ const { parsePositiveRupeeInteger } = require("../utils/money");
 const { withTransaction } = require("../utils/transaction");
 const { isSchemeFinanciallyLocked } = require("../utils/scheme");
 const { parseDateRange } = require("../utils/date");
+const { parseCursorPagination, buildCursorPage } = require("../utils/pagination");
 const { logAudit } = require("./audit.service");
 const { getPaymentByIdOrThrow } = require("./payment.service");
 const { getSchemeLimitSummary } = require("./paymentLimit.service");
@@ -659,17 +661,75 @@ const listCorrections = async (filters = {}, actor) => {
     if (range.to) query.createdAt.$lte = range.to;
   }
 
-  const items = await PaymentCorrection.find(query)
-    .populate("requestedBy", "name role")
-    .populate("reviewedBy", "name role")
-    .populate("payment", "receiptNumber amount paymentMethod status paymentDate")
-    .populate("customer", "name passbookNumber phone")
-    .populate("scheme", "enrollmentNumber status")
-    .sort({ createdAt: -1 })
-    .limit(Math.min(Number(filters.limit) || 100, 200))
-    .lean();
+  const { limit: resolvedLimit, cursor: decodedCursor } = parseCursorPagination(
+    { cursor: filters.cursor, limit: filters.limit },
+    { maxLimit: 200, defaultLimit: 50 }
+  );
 
-  return items.map(mapCorrection);
+  const scopeToken = JSON.stringify({
+    actorRole: actor?.role || null,
+    actorId: actor?._id ? String(actor._id) : null,
+    requestedBy: query.requestedBy ? String(query.requestedBy) : null,
+    status: query.status || null,
+    customer: query.customer ? String(query.customer) : null,
+    scheme: query.scheme ? String(query.scheme) : null,
+    from: range.from ? range.from.toISOString() : null,
+    to: range.to ? range.to.toISOString() : null,
+  });
+
+  if (decodedCursor) {
+    if (
+      typeof decodedCursor !== "object" ||
+      !decodedCursor._id ||
+      decodedCursor.createdAt == null ||
+      typeof decodedCursor.scope !== "string"
+    ) {
+      throw new ApiError(400, "Invalid cursor.");
+    }
+    if (decodedCursor.scope !== scopeToken) {
+      throw new ApiError(400, "Cursor does not match the current scope.");
+    }
+    const createdAt = new Date(decodedCursor.createdAt);
+    if (Number.isNaN(createdAt.getTime()) || !mongoose.Types.ObjectId.isValid(decodedCursor._id)) {
+      throw new ApiError(400, "Invalid cursor.");
+    }
+    const cursorId = new mongoose.Types.ObjectId(String(decodedCursor._id));
+    query.$or = [
+      { createdAt: { $lt: createdAt } },
+      { createdAt, _id: { $lt: cursorId } },
+    ];
+  }
+
+  const [rows, count] = await Promise.all([
+    PaymentCorrection.find(query)
+      .populate("requestedBy", "name role")
+      .populate("reviewedBy", "name role")
+      .populate("payment", "receiptNumber amount paymentMethod status paymentDate")
+      .populate("customer", "name passbookNumber phone")
+      .populate("scheme", "enrollmentNumber status")
+      .sort({ createdAt: -1, _id: -1 })
+      .limit(resolvedLimit + 1)
+      .lean(),
+    PaymentCorrection.countDocuments(
+      Object.fromEntries(Object.entries(query).filter(([key]) => key !== "$or"))
+    ),
+  ]);
+
+  const items = rows.map(mapCorrection);
+  const page = buildCursorPage(items, {
+    limit: resolvedLimit,
+    getCursorValue: (row) => ({
+      createdAt: row.createdAt,
+      _id: row._id,
+      scope: scopeToken,
+    }),
+  });
+
+  return {
+    items: page.items,
+    pageInfo: page.pageInfo,
+    summary: { count },
+  };
 };
 
 const getCorrectionDetail = async (correctionId, actor) => {

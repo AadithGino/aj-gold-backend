@@ -7,7 +7,8 @@ const {
   getCustomerDetail,
   getCustomerSchemes,
 } = require("../services/customer.service");
-const { getCustomerRedemptionHistory } = require("../services/dashboard.service");
+const { getCustomerRedemptionHistory } = require("../services/settlementHistory.service");
+const { sendPaged } = require("../utils/httpPage");
 const ApiError = require("../utils/ApiError");
 const asyncHandler = require("../utils/asyncHandler");
 
@@ -122,17 +123,18 @@ const getCustomerSchemesHandler = asyncHandler(async (req, res) => {
 });
 
 const getCustomerRedemptionsHandler = asyncHandler(async (req, res) => {
-  const data = await getCustomerRedemptionHistory(req.params.customerId, {
-    from: req.query.from,
-    to: req.query.to,
-    cursor: req.query.cursor,
-    limit: req.query.limit,
-  });
+  const result = await getCustomerRedemptionHistory(
+    req.params.customerId,
+    {
+      from: req.query.from,
+      to: req.query.to,
+      cursor: req.query.cursor,
+      limit: req.query.limit,
+    },
+    { includeCustomer: true }
+  );
 
-  return res.status(200).json({
-    success: true,
-    data,
-  });
+  return sendPaged(res, result);
 });
 
 module.exports = {

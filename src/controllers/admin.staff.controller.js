@@ -154,11 +154,23 @@ const getStaffCashSummaryHandler = asyncHandler(async (req, res) => {
 });
 
 const getStaffRedeemedClosedHistoryHandler = asyncHandler(async (req, res) => {
-  const history = await getStaffRedeemedClosedHistory(req.params.staffId);
+  const history = await getStaffRedeemedClosedHistory(req.params.staffId, {
+    from: req.query.from,
+    to: req.query.to,
+    cursor: req.query.cursor,
+    limit: req.query.limit,
+  });
 
   return res.status(200).json({
     success: true,
-    data: history,
+    data: {
+      items: history.items,
+      summary: history.summary,
+      range: history.range,
+      redeemed: history.redeemed,
+      closed: history.closed,
+    },
+    pageInfo: history.pageInfo,
   });
 });
 

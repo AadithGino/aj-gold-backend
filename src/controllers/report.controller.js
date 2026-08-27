@@ -40,7 +40,7 @@ const {
 const collectionsHandler = asyncHandler(async (req, res) => {
   await assertStaffReportAccess(req.user);
   const data = await getCollectionReport(req.query, req.user);
-  res.json({ success: true, data });
+  res.json({ success: true, data, pageInfo: data.pageInfo });
 });
 
 const staffPerformanceHandler = asyncHandler(async (req, res) => {
@@ -58,7 +58,7 @@ const cashPositionHandler = asyncHandler(async (req, res) => {
 const schemesHandler = asyncHandler(async (req, res) => {
   await assertStaffReportAccess(req.user);
   const data = await getSchemeReport(req.query);
-  res.json({ success: true, data });
+  res.json({ success: true, data, pageInfo: data.pageInfo });
 });
 
 const maturityCalendarHandler = asyncHandler(async (req, res) => {

@@ -7,8 +7,8 @@ const {
   getStaffRedemptionHistory,
   getOwnCustomerRedemptionHistory,
 } = require("../services/dashboard.service");
-const { USER_ROLES } = require("../constants/enums");
-const ApiError = require("../utils/ApiError");
+const { sendPaged } = require("../utils/httpPage");
+const { listPayments } = require("../services/payment.service");
 
 const adminDashboardHandler = async (req, res, next) => {
   try {
@@ -45,13 +45,31 @@ const customerDashboardHandler = async (req, res, next) => {
 
 const customerRedemptionHistoryHandler = async (req, res, next) => {
   try {
-    const data = await getOwnCustomerRedemptionHistory(req.user, {
+    const result = await getOwnCustomerRedemptionHistory(req.user, {
       from: req.query.from,
       to: req.query.to,
       cursor: req.query.cursor,
       limit: req.query.limit,
     });
-    res.json({ success: true, data });
+    sendPaged(res, result);
+  } catch (err) {
+    next(err);
+  }
+};
+
+const customerPaymentsHandler = async (req, res, next) => {
+  try {
+    const result = await listPayments(
+      {
+        from: req.query.from,
+        to: req.query.to,
+        method: req.query.method,
+        cursor: req.query.cursor,
+        limit: req.query.limit,
+      },
+      req.user
+    );
+    sendPaged(res, result);
   } catch (err) {
     next(err);
   }
@@ -59,11 +77,13 @@ const customerRedemptionHistoryHandler = async (req, res, next) => {
 
 const staffRedemptionHistoryHandler = async (req, res, next) => {
   try {
-    const data = await getStaffRedemptionHistory(req.user, {
+    const result = await getStaffRedemptionHistory(req.user, {
       from: req.query.from,
       to: req.query.to,
+      cursor: req.query.cursor,
+      limit: req.query.limit,
     });
-    res.json({ success: true, data });
+    sendPaged(res, result);
   } catch (err) {
     next(err);
   }
@@ -83,5 +103,6 @@ module.exports = {
   staffRedemptionHistoryHandler,
   customerDashboardHandler,
   customerRedemptionHistoryHandler,
+  customerPaymentsHandler,
   roleProfileHandler,
 };

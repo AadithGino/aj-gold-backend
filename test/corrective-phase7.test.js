@@ -14,6 +14,7 @@ const PACKAGING_FILES = [
   "scripts/package-final-archive.js",
   "test/corrective-phase7.test.js",
   "package.json",
+  "src/migrations/versions/012_scheme_settlement_history_indexes.js",
 ];
 
 const expectedMigrations = [
@@ -28,6 +29,7 @@ const expectedMigrations = [
   "src/migrations/versions/009_enforce_required_index_options.js",
   "src/migrations/versions/010_audit_legacy_journal_backfill.js",
   "src/migrations/versions/011_payment_correction_version_backfill_batched.js",
+  "src/migrations/versions/012_scheme_settlement_history_indexes.js",
 ];
 
 const expectedRuntimeFiles = [
@@ -153,7 +155,7 @@ describe("Corrective Phase 7 — release packaging and contract freeze", () => {
       assert.equal(sidecar.sha256, zipSha);
       assert.equal(sidecar.commit, cloneHead);
       assert.equal(sidecar.packageLockSha256, EXPECTED_LOCK_SHA);
-      assert.equal(sidecar.migrationRange, "001–011");
+      assert.equal(sidecar.migrationRange, "001–012");
       assert.equal(sidecar.deploymentOccurred, false);
       assert.ok(sidecar.createdAtUtc);
       assert.ok(sidecar.node);
