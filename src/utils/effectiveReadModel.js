@@ -7,6 +7,8 @@ const {
   getEffectivePaymentView,
 } = require("./paymentLedger");
 
+const { inBusinessTz } = require("./date");
+
 const comparePaymentTimeline = (left, right) => {
   const leftDate = new Date(left.paymentDate).getTime();
   const rightDate = new Date(right.paymentDate).getTime();
@@ -42,6 +44,7 @@ const loadEffectivePaymentContext = async (match = {}, { session = null } = {}) 
   const paymentMatch = { ...match };
   delete paymentMatch.status;
   delete paymentMatch.paymentMethod;
+  delete paymentMatch.paymentDate;
 
   const payments = await Payment.find(paymentMatch).session(session || null).lean();
   if (!payments.length) {
@@ -119,7 +122,7 @@ const aggregateEffectiveHourly = async (match = {}, filters = {}) => {
   const byHour = new Map();
 
   for (const { ledger } of filtered) {
-    const hour = new Date(ledger.paymentDate).getHours();
+    const hour = inBusinessTz(ledger.paymentDate).hour();
     const row = byHour.get(hour) || { total: 0, count: 0 };
     row.total += ledger.amount;
     row.count += 1;

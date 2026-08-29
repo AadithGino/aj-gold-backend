@@ -107,6 +107,8 @@ const dispatchOutboxEvent = async (event) => {
     case "CORRECTION_APPROVED":
     case "CASH_SUBMITTED":
     case "SETTLEMENT_FINALIZED":
+    case "SCHEME_ACTIVATED":
+    case "SCHEME_MATURED":
       await deliverInAppNotification(event.payload, event.dedupeKey);
       return;
     default:

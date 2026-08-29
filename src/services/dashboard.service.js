@@ -35,6 +35,9 @@ const {
   getStaffRedemptionHistory,
   listSettlementHistory,
 } = require("./settlementHistory.service");
+const { enqueueOutboxEvent } = require("./outbox.service");
+const { OUTBOX_TOPICS } = require("../models/outboxEvent.model");
+const { NOTIFICATION_TYPES } = require("../models/notification.model");
 
 const APP_VERSION = "v1.0.0";
 
@@ -106,8 +109,6 @@ const getAdminDashboard = async () => {
     recentPayments,
     staffUsers,
     topStaffRows,
-    allTimeCashByStaff,
-    submittedRows,
   ] = await Promise.all([
     Scheme.countDocuments({ status: SCHEME_STATUS.ACTIVE }),
     Scheme.countDocuments({
@@ -141,42 +142,27 @@ const getAdminDashboard = async () => {
         collectedByRole: USER_ROLES.STAFF,
       }
     ),
-    aggregateEffectiveByStaff(
-      { collectedByRole: USER_ROLES.STAFF },
-      { paymentMethod: PAYMENT_METHODS.CASH }
-    ),
-    CashSubmission.aggregate([
-      { $match: { status: "ACTIVE" } },
-      { $group: { _id: "$staff", total: { $sum: "$submittedAmount" } } },
-    ]),
   ]);
 
   const today = buildTodayMethodTotals(todayBreakdown);
   const cashPosition = await getCashPositionSummary();
 
-  const submittedByStaff = new Map(
-    submittedRows.map((row) => [String(row._id), row.total || 0])
-  );
-  const staffCashSummaries = staffUsers.map((staff) => {
-    const staffId = String(staff._id);
-    const cashCollected = allTimeCashByStaff.get(staffId)?.total || 0;
-    const cashSubmitted = submittedByStaff.get(staffId) || 0;
-    const cashInHand = cashCollected - cashSubmitted;
-    return {
-      staff,
-      cashCollected,
-      cashSubmitted,
-      cashInHand,
-    };
-  });
-
-  const pendingStaff = staffCashSummaries.filter((row) => row.cashInHand > 0);
-  const totalStaffCashInHand = staffCashSummaries.reduce(
-    (sum, row) => sum + row.cashInHand,
+  const staffMap = new Map(staffUsers.map((staff) => [String(staff._id), staff]));
+  const pendingCashSubmissionStaff = (cashPosition.staffCashRows || [])
+    .filter((row) => (row.cashInHand || 0) > 0)
+    .map((row) => {
+      const staff = staffMap.get(String(row.staffId));
+      return {
+        staffId: row.staffId,
+        name: row.staffName || staff?.name || "—",
+        phone: staff?.phone || row.phone || "—",
+        cashInHand: row.cashInHand,
+      };
+    });
+  const totalStaffCashInHand = pendingCashSubmissionStaff.reduce(
+    (sum, row) => sum + (row.cashInHand || 0),
     0
   );
-
-  const staffMap = new Map(staffUsers.map((staff) => [String(staff._id), staff]));
   const topStaffByTodayCollection = Array.from(topStaffRows.entries())
     .map(([staffId, row]) => {
       const staff = staffMap.get(String(staffId));
@@ -211,9 +197,10 @@ const getAdminDashboard = async () => {
     today,
     ...cashPosition,
     pendingCashSubmissionSummary: {
-      staffWithPendingCash: pendingStaff.length,
+      staffWithPendingCash: pendingCashSubmissionStaff.length,
       totalPendingCash: totalStaffCashInHand,
     },
+    pendingCashSubmissionStaff,
     topStaffByTodayCollection,
     pendingRedemptionsPreview,
     recentPayments: enrichedRecentPayments
@@ -397,6 +384,27 @@ const getCustomerDashboard = async (user) => {
   const limitSummary = activeScheme
     ? await getSchemeLimitSummary(activeScheme._id)
     : null;
+
+  if (activeScheme?.isMatured && customer.user) {
+    try {
+      await enqueueOutboxEvent({
+        topic: OUTBOX_TOPICS.SCHEME_MATURED,
+        dedupeKey: `scheme-matured:${activeScheme._id}`,
+        payload: {
+          recipient: customer.user,
+          type: NOTIFICATION_TYPES.SCHEME_MATURED,
+          title: "Scheme Matured",
+          message: `Your scheme ${activeScheme.enrollmentNumber} has matured and is ready for redemption.`,
+          data: {
+            schemeId: activeScheme._id,
+            enrollmentNumber: activeScheme.enrollmentNumber,
+          },
+        },
+      });
+    } catch {
+      // Read path must stay available even if the one-time notice fails.
+    }
+  }
 
   return {
     profile: customer,

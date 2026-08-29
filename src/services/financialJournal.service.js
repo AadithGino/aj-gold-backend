@@ -241,6 +241,52 @@ const getStaffCustodyBalance = async (staffId, session = null) => {
   return debits - credits;
 };
 
+const getStaffCustodyBalanceMap = async (staffIds = [], session = null) => {
+  const { JOURNAL_ACCOUNTS } = require("../constants/journalAccounts");
+  const account = JOURNAL_ACCOUNTS.STAFF_CASH_CUSTODY;
+  const uniqueIds = [...new Set(staffIds.map((id) => String(id)))].filter(Boolean);
+  const map = new Map(uniqueIds.map((id) => [id, 0]));
+  if (!uniqueIds.length) return map;
+
+  const objectIds = uniqueIds
+    .filter((id) => mongoose.Types.ObjectId.isValid(id))
+    .map((id) => new mongoose.Types.ObjectId(id));
+
+  const rows = await FinancialJournal.aggregate([
+    {
+      $match: {
+        $or: [{ debitAccount: account }, { creditAccount: account }],
+      },
+    },
+    {
+      $addFields: {
+        staffKey: { $ifNull: ["$metadata.staffId", "$actor"] },
+      },
+    },
+    {
+      $match: {
+        $or: [{ staffKey: { $in: objectIds } }, { staffKey: { $in: uniqueIds } }],
+      },
+    },
+    {
+      $group: {
+        _id: { $toString: "$staffKey" },
+        debits: {
+          $sum: { $cond: [{ $eq: ["$debitAccount", account] }, "$amount", 0] },
+        },
+        credits: {
+          $sum: { $cond: [{ $eq: ["$creditAccount", account] }, "$amount", 0] },
+        },
+      },
+    },
+  ]).session(session || null);
+
+  for (const row of rows) {
+    map.set(String(row._id), (row.debits || 0) - (row.credits || 0));
+  }
+  return map;
+};
+
 const getEventTypeTotal = async (eventType, session = null) => {
   const rows = await FinancialJournal.aggregate([
     { $match: { eventType } },
@@ -264,6 +310,7 @@ module.exports = {
   getJournalEntriesForScheme,
   getJournalAccountBalance,
   getStaffCustodyBalance,
+  getStaffCustodyBalanceMap,
   getEventTypeTotal,
   getSettlementPaidTotal,
   assertJournalImmutable,

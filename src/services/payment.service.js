@@ -493,13 +493,25 @@ const listPayments = async (
     hasMoreRaw = rows.length === batchSize;
   }
 
-  return buildCursorPage(items, {
+  const page = buildCursorPage(items, {
     limit: resolvedLimit,
     getCursorValue: (row) => ({
       _id: row._id,
       scope: scopeToken,
     }),
   });
+
+  // Approximate total from the immutable payment query (before effective overlays).
+  // Date/method filters are applied after enrichment, so this is an upper bound when those filters are set.
+  const total = await Payment.countDocuments(query);
+  return {
+    ...page,
+    pageInfo: {
+      ...page.pageInfo,
+      total,
+    },
+    summary: { count: total },
+  };
 };
 
 const getPaymentDetail = async (paymentId, actor = null) => {

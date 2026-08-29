@@ -50,18 +50,28 @@ const notifyPaymentReversed = async ({ customer, payment }) => {
 };
 
 const getNotifications = async (userId, { page = 1, limit = MAX_FETCH } = {}) => {
-  const skip = (Math.max(page, 1) - 1) * Math.min(limit, MAX_FETCH);
+  const pageNum = Math.max(Number(page) || 1, 1);
+  const pageLimit = Math.min(Math.max(Number(limit) || MAX_FETCH, 1), MAX_FETCH);
+  const skip = (pageNum - 1) * pageLimit;
 
-  const [items, unreadCount] = await Promise.all([
+  const [items, unreadCount, total] = await Promise.all([
     Notification.find({ recipient: userId })
       .sort({ createdAt: -1 })
       .skip(skip)
-      .limit(Math.min(limit, MAX_FETCH))
+      .limit(pageLimit)
       .lean(),
     Notification.countDocuments({ recipient: userId, isRead: false }),
+    Notification.countDocuments({ recipient: userId }),
   ]);
 
-  return { items, unreadCount };
+  return {
+    items,
+    unreadCount,
+    page: pageNum,
+    limit: pageLimit,
+    total,
+    hasMore: pageNum * pageLimit < total,
+  };
 };
 
 const markRead = async (notificationId, userId) => {

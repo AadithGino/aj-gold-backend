@@ -675,6 +675,16 @@ describe("Phase 4 custody, reconciliation, timezone, outbox", () => {
       admin
     );
 
+    const activated = await processOutboxBatch({ limit: 10 });
+    assert.equal(activated.sent, 1);
+    assert.equal(
+      await Notification.countDocuments({
+        recipient: customer.user,
+        type: "SCHEME_ACTIVATED",
+      }),
+      1
+    );
+
     await withMockedNow(firstPeriodTime(), () =>
       collectPayment(
         {
@@ -695,7 +705,10 @@ describe("Phase 4 custody, reconciliation, timezone, outbox", () => {
     const result = await processOutboxBatch({ limit: 10 });
     assert.equal(result.sent, 1);
 
-    const notifications = await Notification.find({ recipient: customer.user });
+    const notifications = await Notification.find({
+      recipient: customer.user,
+      type: "PAYMENT_RECEIVED",
+    });
     assert.equal(notifications.length, 1);
   });
 });

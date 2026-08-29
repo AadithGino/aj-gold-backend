@@ -23,6 +23,9 @@ const {
 } = require("./idempotency.service");
 const { buildSchemeCreateIntent } = require("../utils/idempotencyPayload");
 const { completeSettlement } = require("./settlement.service");
+const { enqueueOutboxEvent } = require("./outbox.service");
+const { OUTBOX_TOPICS } = require("../models/outboxEvent.model");
+const { NOTIFICATION_TYPES } = require("../models/notification.model");
 
 const getSchemeOrThrow = async (schemeId, session = null) => {
   const scheme = await Scheme.findById(schemeId).session(session || null);
@@ -136,6 +139,26 @@ const createScheme = async ({ customerId, schemeName, startDate, clientRequestId
       resourceId: scheme._id,
       session,
     });
+
+    if (customer.user) {
+      await enqueueOutboxEvent(
+        {
+          topic: OUTBOX_TOPICS.SCHEME_ACTIVATED,
+          dedupeKey: `scheme-activated:${scheme._id}`,
+          payload: {
+            recipient: customer.user,
+            type: NOTIFICATION_TYPES.SCHEME_ACTIVATED,
+            title: "Scheme Started",
+            message: `Your scheme ${scheme.enrollmentNumber} is now active.`,
+            data: {
+              schemeId: scheme._id,
+              enrollmentNumber: scheme.enrollmentNumber,
+            },
+          },
+        },
+        session
+      );
+    }
 
     return { replay: false, schemeId: scheme._id };
   });

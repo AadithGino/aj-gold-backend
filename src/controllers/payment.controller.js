@@ -43,6 +43,7 @@ const listPaymentsHandler = asyncHandler(async (req, res) => {
     success: true,
     data: result.items,
     pageInfo: result.pageInfo,
+    summary: result.summary,
   });
 });
 

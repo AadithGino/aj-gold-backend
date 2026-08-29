@@ -16,6 +16,7 @@ const ApiError = require("../utils/ApiError");
 const { parseDateRange, startOfDay, endOfDay } = require("../utils/date");
 const dayjs = require("dayjs");
 const { getCashPositionSummary } = require("./cashPosition.service");
+const { getStaffCustodyBalanceMap } = require("./financialJournal.service");
 const { enrichScheme, getCustomerDetail, getCustomerOrThrow } = require("./customer.service");
 const { getSchemeLimitSummariesBatch } = require("./paymentLimit.service");
 const { parseCursorPagination, buildCursorPage } = require("../utils/pagination");
@@ -168,6 +169,7 @@ const getCollectionReport = async (filters = {}, actor) => {
   }
   if (query.paymentDate) {
     effectiveFilters.paymentDate = query.paymentDate;
+    delete query.paymentDate;
   }
 
   const scopeToken = buildCollectionScopeToken({
@@ -310,6 +312,7 @@ const getStaffPerformanceReport = async (filters = {}) => {
   const effectiveFilters = {};
   if (query.paymentDate) {
     effectiveFilters.paymentDate = query.paymentDate;
+    delete query.paymentDate;
   }
   if (query.paymentMethod) {
     effectiveFilters.paymentMethod = query.paymentMethod;
@@ -339,6 +342,9 @@ const getStaffPerformanceReport = async (filters = {}) => {
   const profileMap = new Map(profiles.map((profile) => [String(profile.user), profile]));
   const submittedByStaff = new Map(
     submissionRows.map((row) => [String(row._id), row.total || 0])
+  );
+  const custodyByStaff = await getStaffCustodyBalanceMap(
+    staffUsers.map((staff) => staff._id)
   );
   const methodTotalsByStaff = new Map();
   const recentByStaff = new Map();
@@ -411,7 +417,7 @@ const getStaffPerformanceReport = async (filters = {}) => {
       const totalCollected = breakdown.reduce((sum, row) => sum + row.total, 0);
       const paymentCount = breakdown.reduce((sum, row) => sum + row.count, 0);
       const submittedCash = submittedByStaff.get(staffId) || 0;
-      const cashInHand = cashCollected - submittedCash;
+      const cashInHand = custodyByStaff.get(staffId) ?? 0;
       const profile = profileMap.get(staffId);
 
       return {
@@ -521,10 +527,13 @@ const getSchemeReport = async (filters = {}) => {
     ];
   }
 
-  const schemes = await Scheme.find(listQuery)
-    .sort({ maturityDate: 1, createdAt: -1, _id: 1 })
-    .limit(limit + 1)
-    .lean();
+  const [schemes, total] = await Promise.all([
+    Scheme.find(listQuery)
+      .sort({ maturityDate: 1, createdAt: -1, _id: 1 })
+      .limit(limit + 1)
+      .lean(),
+    Scheme.countDocuments(query),
+  ]);
 
   const uniqueCustomerIds = [...new Set(schemes.map((scheme) => String(scheme.customer)))];
   const [customers, limitSummaries] = await Promise.all([
@@ -571,8 +580,11 @@ const getSchemeReport = async (filters = {}) => {
 
   return {
     items: page.items,
-    count: page.items.length,
-    pageInfo: page.pageInfo,
+    count: total,
+    pageInfo: {
+      ...page.pageInfo,
+      total,
+    },
   };
 };
 
