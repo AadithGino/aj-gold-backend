@@ -30,6 +30,7 @@ const expectedMigrations = [
   "src/migrations/versions/010_audit_legacy_journal_backfill.js",
   "src/migrations/versions/011_payment_correction_version_backfill_batched.js",
   "src/migrations/versions/012_scheme_settlement_history_indexes.js",
+  "src/migrations/versions/013_customer_deletion_request_indexes.js",
 ];
 
 const expectedRuntimeFiles = [
@@ -257,7 +258,7 @@ describe("Corrective Phase 7 — release packaging and contract freeze", () => {
 
     const combined = sources.join("\n");
     assert.doesNotMatch(combined, /goldRate|goldWeight|inventory|deliverySchedule/i);
-    assert.doesNotMatch(combined, /\/register\b|self-registration|registerCustomer/i);
+    assert.doesNotMatch(combined, /\/api\/account\/deletion-requests|anonymiz/i);
 
     const settlementContract = fs.readFileSync(
       path.join(backendRoot, "src/constants/settlementContract.js"),

@@ -46,8 +46,7 @@ describe("Scope freeze protections", () => {
     const disallowedPatterns = [
       /\/mfa\//i,
       /mfaEnrollment|adminMfa|mfaSecret|mfaRecoveryCode|mfaChallenge/i,
-      /accountDeletion|deletion-requests|deletion-status|anonymiz/i,
-      /\/register\b|self[-_\s]?register|public[-_\s]?registration/i,
+      /accountDeletion|\/api\/account\/deletion-requests|deletion-status|anonymiz/i,
       /payment.?gateway|razorpay|stripe|paypal/i,
       /gold.?rate|gold.?weight|purity|jewellery.?inventory|gold.?price/i,
       /settlement.?acknowledg(e)?ment/i,

@@ -59,13 +59,8 @@ const getEffectivePaymentViewForPayment = async (paymentId, session = null) => {
   return getEffectivePaymentView(payment, latestCorrection);
 };
 
-const assertNonCashCollectionReference = (paymentMethod, transactionReference) => {
-  const { PAYMENT_METHODS } = require("../constants/enums");
-  const ApiError = require("./ApiError");
-  if (paymentMethod !== PAYMENT_METHODS.CASH && !String(transactionReference || "").trim()) {
-    throw new ApiError(400, "transactionReference is required for non-cash payment methods.");
-  }
-};
+/** Transaction reference is optional for all payment methods (including corrections). */
+const assertNonCashCollectionReference = (_paymentMethod, _transactionReference) => {};
 
 module.exports = {
   buildEffectiveSnapshot,

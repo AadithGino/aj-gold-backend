@@ -92,12 +92,12 @@ describe("Phase 7 production contract regression proofs", () => {
     assert.ok(result.token);
   });
 
-  it("no public registration route exists in route sources", () => {
+  it("public customer registration route exists in route sources", () => {
     const routesDir = path.join(__dirname, "../src/routes");
     const sources = fs.readdirSync(routesDir).map((file) =>
       fs.readFileSync(path.join(routesDir, file), "utf8")
     );
-    assert.equal(/\/register|registerCustomer|self-registration/i.test(sources.join("\n")), false);
+    assert.match(sources.join("\n"), /\/register/);
   });
 
   it("P0-9 migration/index/preflight artifacts are present on clean DB", async () => {

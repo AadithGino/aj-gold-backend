@@ -44,7 +44,10 @@ const httpRequest = ({ method, path, token, body, headers = {} }) =>
         method,
         headers: {
           ...(payload
-            ? { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(payload) }
+            ? {
+                "Content-Type": "application/json",
+                "Content-Length": Buffer.byteLength(payload),
+              }
             : {}),
           ...(token ? { Authorization: `Bearer ${token}` } : {}),
           ...headers,
@@ -63,7 +66,7 @@ const httpRequest = ({ method, path, token, body, headers = {} }) =>
           }
           resolve({ status: res.statusCode, body: json });
         });
-      }
+      },
     );
     req.on("error", reject);
     if (payload) req.write(payload);
@@ -98,7 +101,9 @@ describe("Phase 3 — collection references and fail-closed permissions", () => 
     replSet = await MongoMemoryReplSet.create({
       replSet: { count: 1, storageEngine: "wiredTiger" },
     });
-    await mongoose.connect(replSet.getUri(), { dbName: `aj_gold_p3_${process.pid}` });
+    await mongoose.connect(replSet.getUri(), {
+      dbName: `aj_gold_p3_${process.pid}`,
+    });
 
     app = require("../src/app");
     server = http.createServer(app);
@@ -106,10 +111,17 @@ describe("Phase 3 — collection references and fail-closed permissions", () => 
     baseUrl = `http://127.0.0.1:${server.address().port}`;
 
     await Promise.all(
-      mongoose.modelNames().map((name) => mongoose.model(name).createCollection().catch(() => {}))
+      mongoose.modelNames().map((name) =>
+        mongoose
+          .model(name)
+          .createCollection()
+          .catch(() => {}),
+      ),
     );
     await runMigrations(mongoose.connection.db);
-    await Promise.all([Notification, StaffProfile].map((model) => model.syncIndexes()));
+    await Promise.all(
+      [Notification, StaffProfile].map((model) => model.syncIndexes()),
+    );
   });
 
   beforeEach(async () => {
@@ -139,7 +151,7 @@ describe("Phase 3 — collection references and fail-closed permissions", () => 
         password: "1234",
         nominee: { name: "Hidden", phone: "9999999999" },
       },
-      admin
+      admin,
     );
 
     const token = signAccessToken(staff);
@@ -170,12 +182,20 @@ describe("Phase 3 — collection references and fail-closed permissions", () => 
     const admin = await createAdmin();
     const staff = await createStaffWithPermissions({ canCreateCustomer: true });
     const customer = await createCustomer(
-      { name: "P3 Creator Pay Block", phone: `7${String(Date.now()).slice(-8)}2`, password: "1234" },
-      admin
+      {
+        name: "P3 Creator Pay Block",
+        phone: `7${String(Date.now()).slice(-8)}2`,
+        password: "1234",
+      },
+      admin,
     );
     const scheme = await createScheme(
-      { customerId: customer._id.toString(), startDate: SCHEME_START, clientRequestId: reqId() },
-      admin
+      {
+        customerId: customer._id.toString(),
+        startDate: SCHEME_START,
+        clientRequestId: reqId(),
+      },
+      admin,
     );
     const token = signAccessToken(staff);
 
@@ -211,19 +231,35 @@ describe("Phase 3 — collection references and fail-closed permissions", () => 
   it("staff without each permission cannot invoke its API; granted staff can", async () => {
     const admin = await createAdmin();
     const customer = await createCustomer(
-      { name: "P3 Matrix Customer", phone: `7${String(Date.now()).slice(-8)}3`, password: "1234" },
-      admin
+      {
+        name: "P3 Matrix Customer",
+        phone: `7${String(Date.now()).slice(-8)}3`,
+        password: "1234",
+      },
+      admin,
     );
     const scheme = await createScheme(
-      { customerId: customer._id.toString(), startDate: SCHEME_START, clientRequestId: reqId() },
-      admin
+      {
+        customerId: customer._id.toString(),
+        startDate: SCHEME_START,
+        clientRequestId: reqId(),
+      },
+      admin,
     );
 
-    const collectStaff = await createStaffWithPermissions({ canCollectPayment: true });
-    const deniedCollect = await createStaffWithPermissions({ canCreateCustomer: true });
-    const reportStaff = await createStaffWithPermissions({ canViewReports: true });
+    const collectStaff = await createStaffWithPermissions({
+      canCollectPayment: true,
+    });
+    const deniedCollect = await createStaffWithPermissions({
+      canCreateCustomer: true,
+    });
+    const reportStaff = await createStaffWithPermissions({
+      canViewReports: true,
+    });
     const cashStaff = await createStaffWithPermissions({ canSubmitCash: true });
-    const createStaff = await createStaffWithPermissions({ canCreateCustomer: true });
+    const createStaff = await createStaffWithPermissions({
+      canCreateCustomer: true,
+    });
 
     const deniedPay = await httpRequest({
       method: "POST",
@@ -304,16 +340,24 @@ describe("Phase 3 — collection references and fail-closed permissions", () => 
     assert.equal(deniedCreate.status, 403);
   });
 
-  it("non-cash collection requires transactionReference; cash does not; payout reference stays optional", async () => {
+  it("non-cash collection allows optional transactionReference; payout reference stays optional", async () => {
     const admin = await createAdmin();
     const staff = await createStaffWithPermissions({ canCollectPayment: true });
     const customer = await createCustomer(
-      { name: "P3 Ref Customer", phone: `7${String(Date.now()).slice(-8)}6`, password: "1234" },
-      admin
+      {
+        name: "P3 Ref Customer",
+        phone: `7${String(Date.now()).slice(-8)}6`,
+        password: "1234",
+      },
+      admin,
     );
     const scheme = await createScheme(
-      { customerId: customer._id.toString(), startDate: SCHEME_START, clientRequestId: reqId() },
-      admin
+      {
+        customerId: customer._id.toString(),
+        startDate: SCHEME_START,
+        clientRequestId: reqId(),
+      },
+      admin,
     );
     const token = signAccessToken(staff);
 
@@ -329,7 +373,7 @@ describe("Phase 3 — collection references and fail-closed permissions", () => 
         clientRequestId: reqId(),
       },
     });
-    assert.equal(missingRef.status, 400);
+    assert.equal(missingRef.status, 201);
 
     const withRef = await httpRequest({
       method: "POST",
@@ -373,7 +417,7 @@ describe("Phase 3 — collection references and fail-closed permissions", () => 
         paymentMethod: PAYMENT_METHODS.CASH,
         clientRequestId: reqId(),
       },
-      admin
+      admin,
     );
 
     const closeWithoutPayoutRef = await httpRequest({
@@ -392,12 +436,20 @@ describe("Phase 3 — collection references and fail-closed permissions", () => 
   it("customer payment creation remains denied", async () => {
     const admin = await createAdmin();
     const customer = await createCustomer(
-      { name: "P3 Customer Role", phone: `7${String(Date.now()).slice(-8)}7`, password: "1234" },
-      admin
+      {
+        name: "P3 Customer Role",
+        phone: `7${String(Date.now()).slice(-8)}7`,
+        password: "1234",
+      },
+      admin,
     );
     const scheme = await createScheme(
-      { customerId: customer._id.toString(), startDate: SCHEME_START, clientRequestId: reqId() },
-      admin
+      {
+        customerId: customer._id.toString(),
+        startDate: SCHEME_START,
+        clientRequestId: reqId(),
+      },
+      admin,
     );
     const customerUser = await User.findById(customer.user);
     const response = await httpRequest({
@@ -419,12 +471,20 @@ describe("Phase 3 — collection references and fail-closed permissions", () => 
     const admin = await createAdmin();
     const staff = await createStaffWithPermissions({ canCollectPayment: true });
     const customer = await createCustomer(
-      { name: "P3 Eligibility", phone: `7${String(Date.now()).slice(-8)}8`, password: "1234" },
-      admin
+      {
+        name: "P3 Eligibility",
+        phone: `7${String(Date.now()).slice(-8)}8`,
+        password: "1234",
+      },
+      admin,
     );
     await createScheme(
-      { customerId: customer._id.toString(), startDate: SCHEME_START, clientRequestId: reqId() },
-      admin
+      {
+        customerId: customer._id.toString(),
+        startDate: SCHEME_START,
+        clientRequestId: reqId(),
+      },
+      admin,
     );
     const token = signAccessToken(staff);
     const res = await httpRequest({

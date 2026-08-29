@@ -3,6 +3,7 @@ const authMiddleware = require("../middleware/auth.middleware");
 const loginRateLimitMiddleware = require("../middleware/loginRateLimit.middleware");
 const {
   loginController,
+  registerController,
   meController,
   logoutController,
 } = require("../controllers/auth.controller");
@@ -10,6 +11,7 @@ const {
 const router = express.Router();
 
 router.post("/login", loginRateLimitMiddleware, loginController);
+router.post("/register", loginRateLimitMiddleware, registerController);
 router.get("/me", authMiddleware, meController);
 router.post("/logout", authMiddleware, logoutController);
 

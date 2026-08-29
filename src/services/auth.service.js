@@ -112,10 +112,35 @@ const me = async (user) => ({
   },
 });
 
+const register = async (payload, { ip } = {}) => {
+  const { registerCustomer } = require("./customer.service");
+  const phone = payload?.phone?.trim();
+  if (phone) {
+    await assertNotLocked({ ip, phone });
+  }
+
+  const { user, customer } = await registerCustomer(payload);
+
+  await logAudit({
+    actor: user._id,
+    actorRole: user.role,
+    action: AUDIT_ACTIONS.LOGIN,
+    targetType: "User",
+    targetId: user._id,
+    notes: "Customer registered and signed in",
+  });
+
+  return {
+    ...buildAuthResponse(user),
+    customer,
+  };
+};
+
 const assertPasswordStrength = assertPrivilegedPassword;
 
 module.exports = {
   login,
+  register,
   logout,
   me,
   assertPasswordStrength,

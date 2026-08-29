@@ -195,11 +195,37 @@ describe("Corrective Phase 4 — authorization, MFA, CORS, privacy", () => {
     assert.equal(item.address, undefined);
   });
 
-  it("collection staff cannot list customers without a search query", async () => {
+  it("collection staff empty list returns only customers with an active scheme", async () => {
+    const admin = await createAdmin();
     const staff = await createStaffWithPermissions({ canCollectPayment: true });
+    const withScheme = await createCustomer(
+      {
+        name: "CP4 Active Scheme",
+        phone: `7${String(Date.now()).slice(-8)}8`,
+        password: "1234",
+      },
+      admin
+    );
+    const withoutScheme = await createCustomer(
+      {
+        name: "CP4 No Scheme",
+        phone: `7${String(Date.now()).slice(-8)}9`,
+        password: "1234",
+      },
+      admin
+    );
+    await createScheme(
+      { customerId: withScheme._id.toString(), startDate: "2026-01-01", clientRequestId: reqId() },
+      admin
+    );
+
     const token = signAccessToken(staff);
     const res = await httpRequest({ method: "GET", path: "/api/customers", token });
-    assert.equal(res.status, 403);
+    assert.equal(res.status, 200);
+    const ids = (res.body.data.items || []).map((item) => String(item._id));
+    assert.equal(ids.includes(String(withScheme._id)), true);
+    assert.equal(ids.includes(String(withoutScheme._id)), false);
+    assert.equal(res.body.data.items[0].nominee, undefined);
   });
 
   it("staff cannot update customer identity details", async () => {

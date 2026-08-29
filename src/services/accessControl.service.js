@@ -75,16 +75,8 @@ const getCustomerAccessMode = async (actor, staffProfile = null) => {
 };
 
 const assertCustomerSearchAccess = async (actor, search = "", staffProfile = null) => {
-  const mode = await getCustomerAccessMode(actor, staffProfile);
-  if (mode === "full") {
-    return mode;
-  }
-
-  if (!String(search || "").trim()) {
-    throw new ApiError(403, "Customer search requires a query for collection staff.");
-  }
-
-  return mode;
+  // Collection staff may list without a query; empty query is scoped to active schemes in searchCustomers.
+  return getCustomerAccessMode(actor, staffProfile);
 };
 
 const assertCustomerUpdateAccess = (actor) => {

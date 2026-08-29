@@ -28,13 +28,21 @@ const {
 } = require("../src/services/correction.service");
 const { createCustomer } = require("../src/services/customer.service");
 const { createScheme } = require("../src/services/schemeManagement.service");
-const { buildReconciliationSummary } = require("../src/services/reconciliation.service");
-const { getStaffCustodyBalance } = require("../src/services/financialJournal.service");
-const { appendJournalEntry } = require("../src/services/financialJournal.service");
+const {
+  buildReconciliationSummary,
+} = require("../src/services/reconciliation.service");
+const {
+  getStaffCustodyBalance,
+} = require("../src/services/financialJournal.service");
+const {
+  appendJournalEntry,
+} = require("../src/services/financialJournal.service");
 const { JOURNAL_ACCOUNTS } = require("../src/constants/journalAccounts");
 const { scanIntegrity } = require("../src/ops/integrityScanner");
 const { processOutboxBatch } = require("../src/services/outbox.service");
-const { FULL_OPERATIONAL_STAFF_PERMISSIONS } = require("./helpers/staffTestPermissions");
+const {
+  FULL_OPERATIONAL_STAFF_PERMISSIONS,
+} = require("./helpers/staffTestPermissions");
 const { runMigrations } = require("../src/migrations/runMigrations");
 const {
   startOfDay,
@@ -43,7 +51,10 @@ const {
   BUSINESS_TIMEZONE,
 } = require("../src/utils/date");
 const { parseSafeSearchTerm } = require("../src/utils/safeSearch");
-const { parseCursorPagination, buildCursorPage } = require("../src/utils/pagination");
+const {
+  parseCursorPagination,
+  buildCursorPage,
+} = require("../src/utils/pagination");
 const { calculateSchemeDates } = require("../src/services/scheme.service");
 const { deriveSchemeWindow } = require("../src/utils/schemeWindow");
 
@@ -69,7 +80,13 @@ const withMockedNow = async (when, fn) => {
   }
 };
 
-const pay = async (customer, scheme, actor, amount, method = PAYMENT_METHODS.CASH) =>
+const pay = async (
+  customer,
+  scheme,
+  actor,
+  amount,
+  method = PAYMENT_METHODS.CASH,
+) =>
   withMockedNow(firstPeriodTime(), () =>
     collectPayment(
       {
@@ -82,8 +99,8 @@ const pay = async (customer, scheme, actor, amount, method = PAYMENT_METHODS.CAS
           : { transactionReference: `TXN-${reqId().slice(0, 8)}` }),
         clientRequestId: reqId(),
       },
-      actor
-    )
+      actor,
+    ),
   );
 
 const firstPeriodTime = () => {
@@ -127,7 +144,9 @@ describe("Phase 4 custody, reconciliation, timezone, outbox", () => {
     for (const collection of Object.values(mongoose.connection.collections)) {
       await collection.deleteMany({});
     }
-    await mongoose.connection.db.collection("journal_migration_ambiguous").deleteMany({});
+    await mongoose.connection.db
+      .collection("journal_migration_ambiguous")
+      .deleteMany({});
     await runMigrations(mongoose.connection.db);
   });
 
@@ -145,11 +164,15 @@ describe("Phase 4 custody, reconciliation, timezone, outbox", () => {
         phone: `7${String(Date.now()).slice(-8)}1`,
         password: "customer1pass",
       },
-      admin
+      admin,
     );
     const scheme = await createScheme(
-      { customerId: customer._id.toString(), startDate: "2025-01-01", clientRequestId: reqId() },
-      admin
+      {
+        customerId: customer._id.toString(),
+        startDate: "2025-01-01",
+        clientRequestId: reqId(),
+      },
+      admin,
     );
 
     await pay(customer, scheme, staff, 5000, PAYMENT_METHODS.CASH);
@@ -167,11 +190,15 @@ describe("Phase 4 custody, reconciliation, timezone, outbox", () => {
         phone: `7${String(Date.now()).slice(-8)}2`,
         password: "customer1pass",
       },
-      admin
+      admin,
     );
     const scheme = await createScheme(
-      { customerId: customer._id.toString(), startDate: "2025-01-01", clientRequestId: reqId() },
-      admin
+      {
+        customerId: customer._id.toString(),
+        startDate: "2025-01-01",
+        clientRequestId: reqId(),
+      },
+      admin,
     );
 
     await pay(customer, scheme, staff, 9000, PAYMENT_METHODS.CASH);
@@ -182,7 +209,7 @@ describe("Phase 4 custody, reconciliation, timezone, outbox", () => {
         submittedAmount: 4000,
         clientRequestId: reqId(),
       },
-      admin
+      admin,
     );
 
     const custody = await getStaffCustodyBalance(staff._id);
@@ -195,7 +222,7 @@ describe("Phase 4 custody, reconciliation, timezone, outbox", () => {
     assert.equal(submissionEntries[0].amount, 4000);
   });
 
-  it("rejects non-cash collection without transactionReference", async () => {
+  it("allows non-cash collection without transactionReference", async () => {
     const admin = await createAdmin();
     const customer = await createCustomer(
       {
@@ -203,14 +230,18 @@ describe("Phase 4 custody, reconciliation, timezone, outbox", () => {
         phone: `7${String(Date.now()).slice(-8)}3`,
         password: "customer1pass",
       },
-      admin
+      admin,
     );
     const scheme = await createScheme(
-      { customerId: customer._id.toString(), startDate: "2025-01-01", clientRequestId: reqId() },
-      admin
+      {
+        customerId: customer._id.toString(),
+        startDate: "2025-01-01",
+        clientRequestId: reqId(),
+      },
+      admin,
     );
 
-    await assert.rejects(
+    const result = await withMockedNow(firstPeriodTime(), () =>
       collectPayment(
         {
           customer: customer._id.toString(),
@@ -219,10 +250,11 @@ describe("Phase 4 custody, reconciliation, timezone, outbox", () => {
           paymentMethod: PAYMENT_METHODS.UPI,
           clientRequestId: reqId(),
         },
-        admin
+        admin,
       ),
-      (error) => error.code === ERROR_CODES.NON_CASH_REFERENCE_REQUIRED
     );
+    assert.equal(result.payment.paymentMethod, PAYMENT_METHODS.UPI);
+    assert.equal(result.payment.transactionReference || "", "");
   });
 
   it("cash submission reversal restores staff custody via journal", async () => {
@@ -234,11 +266,15 @@ describe("Phase 4 custody, reconciliation, timezone, outbox", () => {
         phone: `7${String(Date.now()).slice(-8)}4`,
         password: "customer1pass",
       },
-      admin
+      admin,
     );
     const scheme = await createScheme(
-      { customerId: customer._id.toString(), startDate: "2025-01-01", clientRequestId: reqId() },
-      admin
+      {
+        customerId: customer._id.toString(),
+        startDate: "2025-01-01",
+        clientRequestId: reqId(),
+      },
+      admin,
     );
 
     await pay(customer, scheme, staff, 6000, PAYMENT_METHODS.CASH);
@@ -249,7 +285,7 @@ describe("Phase 4 custody, reconciliation, timezone, outbox", () => {
         submittedAmount: 6000,
         clientRequestId: reqId(),
       },
-      admin
+      admin,
     );
 
     assert.equal(await getStaffCustodyBalance(staff._id), 0);
@@ -257,7 +293,7 @@ describe("Phase 4 custody, reconciliation, timezone, outbox", () => {
     await reverseCashSubmission(
       submission._id,
       { reason: "Wrong submission amount", clientRequestId: reqId() },
-      admin
+      admin,
     );
 
     assert.equal(await getStaffCustodyBalance(staff._id), 6000);
@@ -272,11 +308,15 @@ describe("Phase 4 custody, reconciliation, timezone, outbox", () => {
         phone: `7${String(Date.now()).slice(-8)}9`,
         password: "customer1pass",
       },
-      admin
+      admin,
     );
     const scheme = await createScheme(
-      { customerId: customer._id.toString(), startDate: "2025-01-01", clientRequestId: reqId() },
-      admin
+      {
+        customerId: customer._id.toString(),
+        startDate: "2025-01-01",
+        clientRequestId: reqId(),
+      },
+      admin,
     );
     await pay(customer, scheme, staff, 4000, PAYMENT_METHODS.CASH);
     const { submission } = await createCashSubmission(
@@ -285,28 +325,28 @@ describe("Phase 4 custody, reconciliation, timezone, outbox", () => {
         submittedAmount: 4000,
         clientRequestId: reqId(),
       },
-      admin
+      admin,
     );
 
     const reverseKey = reqId();
     await reverseCashSubmission(
       submission._id,
       { reason: "initial reversal", clientRequestId: reverseKey },
-      admin
+      admin,
     );
     await reverseCashSubmission(
       submission._id,
       { reason: "initial reversal", clientRequestId: reverseKey },
-      admin
+      admin,
     );
 
     await assert.rejects(
       reverseCashSubmission(
         submission._id,
         { reason: "different key replay", clientRequestId: reqId() },
-        admin
+        admin,
       ),
-      (error) => error.code === ERROR_CODES.CASH_SUBMISSION_ALREADY_REVERSED
+      (error) => error.code === ERROR_CODES.CASH_SUBMISSION_ALREADY_REVERSED,
     );
 
     const reversalEntries = await FinancialJournal.find({
@@ -324,11 +364,15 @@ describe("Phase 4 custody, reconciliation, timezone, outbox", () => {
         phone: `7${String(Date.now()).slice(-8)}8`,
         password: "customer1pass",
       },
-      admin
+      admin,
     );
     const scheme = await createScheme(
-      { customerId: customer._id.toString(), startDate: "2025-01-01", clientRequestId: reqId() },
-      admin
+      {
+        customerId: customer._id.toString(),
+        startDate: "2025-01-01",
+        clientRequestId: reqId(),
+      },
+      admin,
     );
     await pay(customer, scheme, staff, 5000, PAYMENT_METHODS.CASH);
 
@@ -339,7 +383,7 @@ describe("Phase 4 custody, reconciliation, timezone, outbox", () => {
           submittedAmount: 4000,
           clientRequestId: reqId(),
         },
-        admin
+        admin,
       ),
       createCashSubmission(
         {
@@ -347,12 +391,16 @@ describe("Phase 4 custody, reconciliation, timezone, outbox", () => {
           submittedAmount: 4000,
           clientRequestId: reqId(),
         },
-        admin
+        admin,
       ),
     ]);
 
-    const fulfilled = [first, second].filter((result) => result.status === "fulfilled");
-    const rejected = [first, second].filter((result) => result.status === "rejected");
+    const fulfilled = [first, second].filter(
+      (result) => result.status === "fulfilled",
+    );
+    const rejected = [first, second].filter(
+      (result) => result.status === "rejected",
+    );
     assert.equal(fulfilled.length, 1);
     assert.equal(rejected.length, 1);
     assert.equal(rejected[0].reason.code, ERROR_CODES.INSUFFICIENT_STAFF_CASH);
@@ -368,47 +416,69 @@ describe("Phase 4 custody, reconciliation, timezone, outbox", () => {
         phone: `7${String(Date.now()).slice(-8)}7`,
         password: "customer1pass",
       },
-      admin
+      admin,
     );
     const scheme = await createScheme(
-      { customerId: customer._id.toString(), startDate: "2025-01-01", clientRequestId: reqId() },
-      admin
+      {
+        customerId: customer._id.toString(),
+        startDate: "2025-01-01",
+        clientRequestId: reqId(),
+      },
+      admin,
     );
-    const paymentResult = await pay(customer, scheme, staff, 5000, PAYMENT_METHODS.CASH);
+    const paymentResult = await pay(
+      customer,
+      scheme,
+      staff,
+      5000,
+      PAYMENT_METHODS.CASH,
+    );
     assert.equal(await getStaffCustodyBalance(staff._id), 5000);
 
     const amountCorrection = await createCorrectionRequest(
       paymentResult.payment._id,
-      { correctionType: CORRECTION_TYPES.EDIT_AMOUNT, requestedValue: 4500, reason: "amount fix" },
-      staff
+      {
+        correctionType: CORRECTION_TYPES.EDIT_AMOUNT,
+        requestedValue: 4500,
+        reason: "amount fix",
+      },
+      staff,
     );
     await approveCorrection(
       amountCorrection._id,
       { reviewClientRequestId: reqId(), reviewNotes: "ok" },
-      admin
+      admin,
     );
     assert.equal(await getStaffCustodyBalance(staff._id), 4500);
 
     const refCorrection = await createCorrectionRequest(
       paymentResult.payment._id,
-      { correctionType: CORRECTION_TYPES.EDIT_REFERENCE, requestedValue: "UPI-CP4-1", reason: "add reference" },
-      staff
+      {
+        correctionType: CORRECTION_TYPES.EDIT_REFERENCE,
+        requestedValue: "UPI-CP4-1",
+        reason: "add reference",
+      },
+      staff,
     );
     await approveCorrection(
       refCorrection._id,
       { reviewClientRequestId: reqId(), reviewNotes: "ok" },
-      admin
+      admin,
     );
 
     const methodCorrection = await createCorrectionRequest(
       paymentResult.payment._id,
-      { correctionType: CORRECTION_TYPES.EDIT_METHOD, requestedValue: PAYMENT_METHODS.UPI, reason: "switch method" },
-      staff
+      {
+        correctionType: CORRECTION_TYPES.EDIT_METHOD,
+        requestedValue: PAYMENT_METHODS.UPI,
+        reason: "switch method",
+      },
+      staff,
     );
     await approveCorrection(
       methodCorrection._id,
       { reviewClientRequestId: reqId(), reviewNotes: "ok" },
-      admin
+      admin,
     );
 
     const adjustments = await FinancialJournal.find({
@@ -430,11 +500,15 @@ describe("Phase 4 custody, reconciliation, timezone, outbox", () => {
         phone: `7${String(Date.now()).slice(-8)}5`,
         password: "customer1pass",
       },
-      admin
+      admin,
     );
     const scheme = await createScheme(
-      { customerId: customer._id.toString(), startDate: "2025-01-01", clientRequestId: reqId() },
-      admin
+      {
+        customerId: customer._id.toString(),
+        startDate: "2025-01-01",
+        clientRequestId: reqId(),
+      },
+      admin,
     );
 
     await pay(customer, scheme, staff, 3000, PAYMENT_METHODS.CASH);
@@ -454,36 +528,50 @@ describe("Phase 4 custody, reconciliation, timezone, outbox", () => {
         phone: `7${String(Date.now()).slice(-8)}0`,
         password: "customer1pass",
       },
-      admin
+      admin,
     );
     const scheme = await createScheme(
-      { customerId: customer._id.toString(), startDate: "2025-01-01", clientRequestId: reqId() },
-      admin
+      {
+        customerId: customer._id.toString(),
+        startDate: "2025-01-01",
+        clientRequestId: reqId(),
+      },
+      admin,
     );
-    const paymentResult = await pay(customer, scheme, staff, 2000, PAYMENT_METHODS.CASH);
+    const paymentResult = await pay(
+      customer,
+      scheme,
+      staff,
+      2000,
+      PAYMENT_METHODS.CASH,
+    );
     const { submission } = await createCashSubmission(
       {
         staff: staff._id.toString(),
         submittedAmount: 1000,
         clientRequestId: reqId(),
       },
-      admin
+      admin,
     );
     await reverseCashSubmission(
       submission._id,
       { reason: "reverse", clientRequestId: reqId() },
-      admin
+      admin,
     );
 
     const correction = await createCorrectionRequest(
       paymentResult.payment._id,
-      { correctionType: CORRECTION_TYPES.EDIT_AMOUNT, requestedValue: 1500, reason: "reduce cash" },
-      staff
+      {
+        correctionType: CORRECTION_TYPES.EDIT_AMOUNT,
+        requestedValue: 1500,
+        reason: "reduce cash",
+      },
+      staff,
     );
     await approveCorrection(
       correction._id,
       { reviewClientRequestId: reqId(), reviewNotes: "ok" },
-      admin
+      admin,
     );
 
     const custodyEvents = await FinancialJournal.find({
@@ -498,7 +586,7 @@ describe("Phase 4 custody, reconciliation, timezone, outbox", () => {
     }).lean();
     assert.ok(custodyEvents.length > 0);
     assert.ok(
-      custodyEvents.every((entry) => entry.metadata?.staffId || entry.actor)
+      custodyEvents.every((entry) => entry.metadata?.staffId || entry.actor),
     );
   });
 
@@ -511,35 +599,58 @@ describe("Phase 4 custody, reconciliation, timezone, outbox", () => {
         phone: `7${String(Date.now()).slice(-8)}4`,
         password: "customer1pass",
       },
-      admin
+      admin,
     );
     const scheme = await createScheme(
-      { customerId: customer._id.toString(), startDate: "2025-01-01", clientRequestId: reqId() },
-      admin
+      {
+        customerId: customer._id.toString(),
+        startDate: "2025-01-01",
+        clientRequestId: reqId(),
+      },
+      admin,
     );
     await pay(customer, scheme, staff, 1000, PAYMENT_METHODS.CASH);
     const entry = await FinancialJournal.findOne({});
     assert.ok(entry);
 
-    await assert.rejects(FinancialJournal.updateOne({ _id: entry._id }, { amount: 99 }), /immutable/i);
-    await assert.rejects(FinancialJournal.updateMany({}, { amount: 99 }), /immutable/i);
-    await assert.rejects(FinancialJournal.deleteOne({ _id: entry._id }), /immutable/i);
+    await assert.rejects(
+      FinancialJournal.updateOne({ _id: entry._id }, { amount: 99 }),
+      /immutable/i,
+    );
+    await assert.rejects(
+      FinancialJournal.updateMany({}, { amount: 99 }),
+      /immutable/i,
+    );
+    await assert.rejects(
+      FinancialJournal.deleteOne({ _id: entry._id }),
+      /immutable/i,
+    );
     await assert.rejects(FinancialJournal.deleteMany({}), /immutable/i);
     await assert.rejects(
       FinancialJournal.findOneAndUpdate({ _id: entry._id }, { amount: 99 }),
-      /immutable/i
+      /immutable/i,
     );
     await assert.rejects(
       FinancialJournal.findOneAndDelete({ _id: entry._id }),
-      /immutable/i
+      /immutable/i,
     );
     await assert.rejects(
-      FinancialJournal.replaceOne({ _id: entry._id }, { ...entry.toObject(), amount: 99 }),
-      /immutable/i
+      FinancialJournal.replaceOne(
+        { _id: entry._id },
+        { ...entry.toObject(), amount: 99 },
+      ),
+      /immutable/i,
     );
     await assert.rejects(
-      FinancialJournal.bulkWrite([{ updateOne: { filter: { _id: entry._id }, update: { $set: { amount: 99 } } } }]),
-      /immutable/i
+      FinancialJournal.bulkWrite([
+        {
+          updateOne: {
+            filter: { _id: entry._id },
+            update: { $set: { amount: 99 } },
+          },
+        },
+      ]),
+      /immutable/i,
     );
   });
 
@@ -571,17 +682,19 @@ describe("Phase 4 custody, reconciliation, timezone, outbox", () => {
         actor: admin._id,
         actorRole: admin.role,
       }),
-      (error) => error.code === ERROR_CODES.JOURNAL_BUSINESS_KEY_MISMATCH
+      (error) => error.code === ERROR_CODES.JOURNAL_BUSINESS_KEY_MISMATCH,
     );
   });
 
   it("integrity scanner reports seeded defects", async () => {
     const customerId = new mongoose.Types.ObjectId();
-    await mongoose.connection.db.collection("journal_migration_ambiguous").insertOne({
-      migrationId: "test",
-      reason: "seeded ambiguity",
-      recordedAt: new Date(),
-    });
+    await mongoose.connection.db
+      .collection("journal_migration_ambiguous")
+      .insertOne({
+        migrationId: "test",
+        reason: "seeded ambiguity",
+        recordedAt: new Date(),
+      });
     await FinancialJournal.collection.insertOne({
       entryId: reqId(),
       businessKey: `seed:self:${reqId()}`,
@@ -615,7 +728,10 @@ describe("Phase 4 custody, reconciliation, timezone, outbox", () => {
       updatedAt: new Date(),
     });
 
-    const report = await scanIntegrity({ db: mongoose.connection.db, limit: 100 });
+    const report = await scanIntegrity({
+      db: mongoose.connection.db,
+      limit: 100,
+    });
     const codes = new Set(report.findings.map((row) => row.code));
     assert.ok(codes.has("MIGRATION_AMBIGUITY"));
     assert.ok(codes.has("JOURNAL_SELF_BALANCE"));
@@ -624,7 +740,10 @@ describe("Phase 4 custody, reconciliation, timezone, outbox", () => {
   });
 
   it("clean fixture produces no critical integrity findings", async () => {
-    const report = await scanIntegrity({ db: mongoose.connection.db, limit: 100 });
+    const report = await scanIntegrity({
+      db: mongoose.connection.db,
+      limit: 100,
+    });
     assert.equal(report.ok, true);
     assert.equal(report.criticalCount, 0);
   });
@@ -668,11 +787,15 @@ describe("Phase 4 custody, reconciliation, timezone, outbox", () => {
         phone: `7${String(Date.now()).slice(-8)}6`,
         password: "customer1pass",
       },
-      admin
+      admin,
     );
     const scheme = await createScheme(
-      { customerId: customer._id.toString(), startDate: "2025-01-01", clientRequestId: reqId() },
-      admin
+      {
+        customerId: customer._id.toString(),
+        startDate: "2025-01-01",
+        clientRequestId: reqId(),
+      },
+      admin,
     );
 
     const activated = await processOutboxBatch({ limit: 10 });
@@ -682,7 +805,7 @@ describe("Phase 4 custody, reconciliation, timezone, outbox", () => {
         recipient: customer.user,
         type: "SCHEME_ACTIVATED",
       }),
-      1
+      1,
     );
 
     await withMockedNow(firstPeriodTime(), () =>
@@ -695,8 +818,8 @@ describe("Phase 4 custody, reconciliation, timezone, outbox", () => {
           transactionReference: "UTR-123456",
           clientRequestId: reqId(),
         },
-        admin
-      )
+        admin,
+      ),
     );
 
     const pending = await OutboxEvent.countDocuments({ status: "PENDING" });

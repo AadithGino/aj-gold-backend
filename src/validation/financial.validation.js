@@ -1,8 +1,14 @@
 const { z } = require("zod");
 const { PAYMENT_METHODS, SCHEME_STATUS } = require("../constants/enums");
-const { ALLOWED_SETTLEMENT_PAYOUT_METHODS } = require("../constants/settlementContract");
+const {
+  ALLOWED_SETTLEMENT_PAYOUT_METHODS,
+} = require("../constants/settlementContract");
 
-const clientRequestIdSchema = z.string().trim().min(1, "clientRequestId is required.").max(128);
+const clientRequestIdSchema = z
+  .string()
+  .trim()
+  .min(1, "clientRequestId is required.")
+  .max(128);
 
 const positiveRupeeSchema = (label = "amount") =>
   z.union([z.number(), z.string()]).superRefine((value, ctx) => {
@@ -10,34 +16,31 @@ const positiveRupeeSchema = (label = "amount") =>
     if (typeof parsed === "string") {
       const trimmed = parsed.trim();
       if (!/^-?\d+$/.test(trimmed)) {
-        ctx.addIssue({ code: "custom", message: `${label} must be a whole rupee amount.` });
+        ctx.addIssue({
+          code: "custom",
+          message: `${label} must be a whole rupee amount.`,
+        });
         return;
       }
       parsed = Number(trimmed);
     }
     if (!Number.isFinite(parsed) || !Number.isInteger(parsed) || parsed <= 0) {
-      ctx.addIssue({ code: "custom", message: `${label} must be a positive whole rupee amount.` });
-    }
-  });
-
-const collectPaymentSchema = z
-  .object({
-    customer: z.string().min(1, "Customer is required."),
-    scheme: z.string().min(1, "Scheme is required."),
-    amount: positiveRupeeSchema("amount"),
-    paymentMethod: z.enum(Object.values(PAYMENT_METHODS)),
-    transactionReference: z.string().trim().optional(),
-    notes: z.string().trim().optional(),
-    clientRequestId: clientRequestIdSchema,
-  })
-  .superRefine((value, ctx) => {
-    if (value.paymentMethod !== PAYMENT_METHODS.CASH && !value.transactionReference?.trim()) {
       ctx.addIssue({
         code: "custom",
-        message: "transactionReference is required for non-cash payment methods.",
+        message: `${label} must be a positive whole rupee amount.`,
       });
     }
   });
+
+const collectPaymentSchema = z.object({
+  customer: z.string().min(1, "Customer is required."),
+  scheme: z.string().min(1, "Scheme is required."),
+  amount: positiveRupeeSchema("amount"),
+  paymentMethod: z.enum(Object.values(PAYMENT_METHODS)),
+  transactionReference: z.string().trim().optional(),
+  notes: z.string().trim().optional(),
+  clientRequestId: clientRequestIdSchema,
+});
 
 const reversePaymentSchema = z.object({
   reason: z.string().trim().min(3, "Reason is required."),
@@ -53,7 +56,9 @@ const cashSubmissionSchema = z.object({
   clientRequestId: clientRequestIdSchema,
 });
 
-const staffSelfCashSubmissionSchema = cashSubmissionSchema.omit({ staff: true });
+const staffSelfCashSubmissionSchema = cashSubmissionSchema.omit({
+  staff: true,
+});
 
 const schemeSettlementSchema = z
   .object({

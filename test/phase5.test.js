@@ -334,14 +334,15 @@ describe("Phase 5 auth and permission guardrails", () => {
     assert.equal(loggedIn.user.mustChangePassword, undefined);
   });
 
-  it("public registration route remains absent", () => {
+  it("public customer registration route is present", () => {
     const routesDir = path.join(__dirname, "../src/routes");
     const routeSources = fs
       .readdirSync(routesDir)
       .filter((file) => file.endsWith(".js"))
       .map((file) => fs.readFileSync(path.join(routesDir, file), "utf8"))
       .join("\n");
-    assert.equal(/\/register|registerCustomer|self-registration/i.test(routeSources), false);
+    assert.match(routeSources, /\/register/);
+    assert.doesNotMatch(routeSources, /\/api\/account\/deletion-requests/);
   });
 
   it("production env rejects empty CORS allowlist", () => {

@@ -34,6 +34,7 @@ const {
 } = require("../utils/effectiveReadModel");
 const { parseSafeSearchTerm } = require("../utils/safeSearch");
 const { parseCursorPagination, buildCursorPage } = require("../utils/pagination");
+const { withTransaction } = require("../utils/transaction");
 
 const getId = (value) => (value && typeof value === "object" ? value._id || null : value || null);
 
@@ -334,6 +335,99 @@ const createCustomer = async (payload, actor) => {
   }
 };
 
+const registerCustomer = async (payload) => {
+  const name = payload.name?.trim();
+  const phone = payload.phone?.trim();
+  const password = payload.password;
+
+  if (!name) {
+    throw new ApiError(400, "Name is required.");
+  }
+  if (!phone) {
+    throw new ApiError(400, "Phone number is required.");
+  }
+  if (!/^\d{10}$/.test(phone)) {
+    throw new ApiError(400, "Phone number must be a 10-digit mobile number.");
+  }
+  if (!password) {
+    throw new ApiError(400, "Password is required.");
+  }
+  assertCustomerPassword(String(password));
+
+  const passbookNumber = await generatePassbookNumber();
+  const existingPassbook = await Customer.findOne({ passbookNumber });
+  if (existingPassbook) {
+    throw new ApiError(409, "Passbook number already exists.");
+  }
+
+  const existingPhone = await User.findOne({ phone });
+  if (existingPhone) {
+    throw new ApiError(409, "Phone number is already registered.");
+  }
+
+  const passwordHash = await bcrypt.hash(String(password), 10);
+  const customerCode = await generateCustomerCode();
+
+  const { user, customer } = await withTransaction(async (session) => {
+    const [createdUser] = await User.create(
+      [
+        {
+          name,
+          phone,
+          passwordHash,
+          role: USER_ROLES.CUSTOMER,
+          status: USER_STATUS.ACTIVE,
+        },
+      ],
+      { session }
+    );
+
+    const [createdCustomer] = await Customer.create(
+      [
+        {
+          user: createdUser._id,
+          customerCode,
+          passbookNumber,
+          name,
+          phone,
+          address: payload.address?.trim() || "",
+          nominee: {
+            name: payload.nominee?.name?.trim() || "",
+            phone: payload.nominee?.phone?.trim() || "",
+            relationship: payload.nominee?.relationship?.trim() || "",
+            address: payload.nominee?.address?.trim() || "",
+          },
+          status: USER_STATUS.ACTIVE,
+          createdBy: createdUser._id,
+          updatedBy: createdUser._id,
+        },
+      ],
+      { session }
+    );
+
+    return { user: createdUser, customer: createdCustomer };
+  });
+
+  await logAudit({
+    actor: user._id,
+    actorRole: user.role,
+    action: AUDIT_ACTIONS.CUSTOMER_CREATED,
+    targetType: "Customer",
+    targetId: customer._id,
+    newValue: {
+      passbookNumber: customer.passbookNumber,
+      name: customer.name,
+      phone: customer.phone,
+    },
+    notes: "Customer self-registered",
+  });
+
+  return {
+    user,
+    customer: sanitizeCustomer(customer),
+  };
+};
+
 const updateCustomer = async (customerId, payload, actor) => {
   assertCustomerUpdateAccess(actor);
   const customer = await getCustomerOrThrow(customerId);
@@ -465,6 +559,12 @@ const searchCustomers = async (search = "", actor = null, options = {}) => {
   if (term) {
     const regex = new RegExp(term, "i");
     query.$or = [{ name: regex }, { phone: regex }, { passbookNumber: regex }];
+  } else if (accessMode === "collection") {
+    // Staff default list: only customers with an active scheme (search still finds any match).
+    const activeCustomerIds = await Scheme.distinct("customer", {
+      status: SCHEME_STATUS.ACTIVE,
+    });
+    query._id = { $in: activeCustomerIds };
   }
 
   let customers = [];
@@ -693,6 +793,7 @@ const getCustomerSchemes = async (customerId, actor = null) => {
 module.exports = {
   sanitizeCustomer,
   createCustomer,
+  registerCustomer,
   updateCustomer,
   resetCustomerPassword,
   searchCustomers,

@@ -44,6 +44,7 @@ const ensureMigrationCollections = async (db) => {
     "idempotencyrecords",
     "outboxevents",
     "loginattempts",
+    "customerdeletionrequests",
   ];
   for (const name of requiredCollections) {
     await db.createCollection(name).catch(() => {});
