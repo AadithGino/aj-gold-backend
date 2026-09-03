@@ -1,5 +1,5 @@
 const fs = require("fs");
-const admin = require("firebase-admin");
+const path = require("path");
 const {
   FCM_ENABLED,
   FIREBASE_PROJECT_ID,
@@ -13,9 +13,32 @@ const { log } = require("../utils/logger");
 const PUSH_TOPICS = new Set(["PAYMENT_RECEIVED"]);
 
 let firebaseApp = null;
+let firebaseAdmin = null;
 let initAttempted = false;
 
+const loadFirebaseAdmin = () => {
+  if (firebaseAdmin) return firebaseAdmin;
+  try {
+    // Lazy load so the API can start when FCM is disabled or deps are not installed yet.
+    firebaseAdmin = require("firebase-admin");
+    return firebaseAdmin;
+  } catch (error) {
+    log("error", "push.firebase.module_missing", {
+      message: String(error.message || "firebase-admin is not installed."),
+    });
+    return null;
+  }
+};
+
 const normalizePrivateKey = (value) => String(value || "").replace(/\\n/g, "\n");
+
+const resolveCredentialsPath = (credentialsPath) => {
+  const trimmed = String(credentialsPath || "").trim();
+  if (!trimmed) return "";
+  if (path.isAbsolute(trimmed)) return trimmed;
+  const projectRoot = path.join(__dirname, "../..");
+  return path.resolve(projectRoot, trimmed);
+};
 
 const getFirebaseApp = () => {
   if (!FCM_ENABLED) return null;
@@ -23,9 +46,13 @@ const getFirebaseApp = () => {
   if (initAttempted) return null;
   initAttempted = true;
 
+  const admin = loadFirebaseAdmin();
+  if (!admin) return null;
+
   try {
-    if (GOOGLE_APPLICATION_CREDENTIALS) {
-      const raw = fs.readFileSync(GOOGLE_APPLICATION_CREDENTIALS, "utf8");
+    const credentialsPath = resolveCredentialsPath(GOOGLE_APPLICATION_CREDENTIALS);
+    if (credentialsPath) {
+      const raw = fs.readFileSync(credentialsPath, "utf8");
       const serviceAccount = JSON.parse(raw);
       firebaseApp = admin.initializeApp({
         credential: admin.credential.cert(serviceAccount),
@@ -51,6 +78,7 @@ const getFirebaseApp = () => {
   } catch (error) {
     log("error", "push.firebase.init_failed", {
       message: String(error.message || "Firebase init failed"),
+      credentialsPath: resolveCredentialsPath(GOOGLE_APPLICATION_CREDENTIALS) || null,
     });
     return null;
   }
@@ -74,6 +102,9 @@ const isInvalidTokenError = (error) => {
 const sendPushToUser = async (userId, { title, body, data = {} }) => {
   const app = getFirebaseApp();
   if (!app) return { sent: 0, failed: 0, skipped: true };
+
+  const admin = loadFirebaseAdmin();
+  if (!admin) return { sent: 0, failed: 0, skipped: true };
 
   const records = await listTokensForUser(userId);
   const tokens = records.map((record) => record.token).filter(Boolean);
