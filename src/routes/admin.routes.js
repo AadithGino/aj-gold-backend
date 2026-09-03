@@ -25,6 +25,7 @@ const {
   getReconciliationExceptionsHandler,
   getAdminSettlementDetailHandler,
 } = require("../controllers/admin.oversight.controller");
+const { adminTestPushByPhoneHandler } = require("../controllers/device.controller");
 
 const router = express.Router();
 
@@ -50,5 +51,6 @@ router.get("/audit-logs", listAuditLogsHandler);
 router.get("/idempotency-records", listIdempotencyRecordsHandler);
 router.get("/outbox-events", listOutboxEventsHandler);
 router.get("/schemes/:schemeId/settlement", getAdminSettlementDetailHandler);
+router.post("/test-push", adminTestPushByPhoneHandler);
 
 module.exports = router;

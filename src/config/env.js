@@ -91,4 +91,12 @@ module.exports = {
   SEED_ALLOW_PRODUCTION: process.env.SEED_ALLOW_PRODUCTION === "true",
   SHUTDOWN_TIMEOUT_MS: Number(process.env.SHUTDOWN_TIMEOUT_MS || 15000),
   SETTLEMENT_FORMULA_VERSION: process.env.SETTLEMENT_FORMULA_VERSION || "principal-v1",
+  FCM_ENABLED: process.env.FCM_ENABLED === "true",
+  FCM_TEST_PUSH_ENABLED:
+    process.env.FCM_TEST_PUSH_ENABLED === "true" ||
+    (process.env.FCM_TEST_PUSH_ENABLED !== "false" && NODE_ENV !== "production"),
+  FIREBASE_PROJECT_ID: process.env.FIREBASE_PROJECT_ID || "",
+  FIREBASE_CLIENT_EMAIL: process.env.FIREBASE_CLIENT_EMAIL || "",
+  FIREBASE_PRIVATE_KEY: process.env.FIREBASE_PRIVATE_KEY || "",
+  GOOGLE_APPLICATION_CREDENTIALS: process.env.GOOGLE_APPLICATION_CREDENTIALS || "",
 };

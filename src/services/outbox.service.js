@@ -2,6 +2,8 @@ const crypto = require("crypto");
 const OutboxEvent = require("../models/outboxEvent.model");
 const { OUTBOX_STATUS } = require("../models/outboxEvent.model");
 const Notification = require("../models/notification.model");
+const { deliverPushNotification } = require("./push.service");
+const { log } = require("../utils/logger");
 
 const MAX_ATTEMPTS = 5;
 const BASE_BACKOFF_MS = 1000;
@@ -110,6 +112,17 @@ const dispatchOutboxEvent = async (event) => {
     case "SCHEME_ACTIVATED":
     case "SCHEME_MATURED":
       await deliverInAppNotification(event.payload, event.dedupeKey);
+      try {
+        await deliverPushNotification(event.payload, event.topic);
+      } catch (error) {
+        if (process.env.NODE_ENV !== "test") {
+          log("warn", "push.delivery.failed", {
+            topic: event.topic,
+            dedupeKey: event.dedupeKey,
+            message: String(error.message || "Push delivery failed"),
+          });
+        }
+      }
       return;
     default:
       throw new Error(`Unsupported outbox topic: ${event.topic}`);

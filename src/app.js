@@ -18,6 +18,7 @@ const reportRoutes       = require("./routes/report.routes");
 const notificationRoutes = require("./routes/notification.routes");
 const correctionRoutes   = require("./routes/correction.routes");
 const profileRoutes      = require("./routes/profileDeletion.routes");
+const deviceRoutes       = require("./routes/device.routes");
 const { notFound, errorHandler } = require("./middleware/error.middleware");
 
 const app = express();
@@ -72,6 +73,7 @@ app.use("/api/reports",       sensitiveResponseMiddleware, reportRoutes);
 app.use("/api/notifications", sensitiveResponseMiddleware, notificationRoutes);
 app.use("/api/corrections",   sensitiveResponseMiddleware, correctionRoutes);
 app.use("/api/profile",       sensitiveResponseMiddleware, profileRoutes);
+app.use("/api/devices",       sensitiveResponseMiddleware, deviceRoutes);
 
 app.use(notFound);
 app.use(errorHandler);
