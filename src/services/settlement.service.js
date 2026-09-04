@@ -73,7 +73,7 @@ const assertSettlementActorAllowed = async (actor, settlementType) => {
 const assertPayoutPayload = (payload) => {
   const payoutMethod = payload.payoutMethod;
   if (!ALLOWED_SETTLEMENT_PAYOUT_METHODS.includes(payoutMethod)) {
-    throw new ApiError(400, "Settlement payout method must be CASH, UPI, or BANK.", [], {
+    throw new ApiError(400, "Settlement payout method must be CASH, UPI, BANK, or GOLD.", [], {
       code: ERROR_CODES.SETTLEMENT_PAYOUT_METHOD_INVALID,
       retryable: false,
     });

@@ -32,10 +32,14 @@ const listCashSubmissionsHandler = asyncHandler(async (req, res) => {
     from: req.query.from,
     to: req.query.to,
   });
+  const summary = {
+    count: items.length,
+    totalAmount: items.reduce((sum, row) => sum + (row.submittedAmount || 0), 0),
+  };
 
   return res.status(200).json({
     success: true,
-    data: { items },
+    data: { items, summary },
   });
 });
 

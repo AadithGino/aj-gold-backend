@@ -164,8 +164,8 @@ describe("Corrective Phase 1 — owner-approved settlement contract", () => {
     if (replSet) await replSet.stop();
   });
 
-  it("contract allows only CASH, UPI, BANK with optional reference and no maker/checker", () => {
-    assert.deepEqual(ALLOWED_SETTLEMENT_PAYOUT_METHODS, ["CASH", "UPI", "BANK"]);
+  it("contract allows CASH, UPI, BANK, GOLD with optional reference and no maker/checker", () => {
+    assert.deepEqual(ALLOWED_SETTLEMENT_PAYOUT_METHODS, ["CASH", "UPI", "BANK", "GOLD"]);
     assert.equal(SETTLEMENT_CONTRACT.payoutReferenceRequired, false);
     assert.equal(SETTLEMENT_CONTRACT.payoutEvidenceRequired, false);
     assert.equal(SETTLEMENT_CONTRACT.makerCheckerRequired, false);

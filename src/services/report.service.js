@@ -11,6 +11,7 @@ const {
   PAYMENT_STATUS,
   SCHEME_STATUS,
   SETTLEMENT_STATUSES,
+  CASH_SUBMISSION_STATUS,
 } = require("../constants/enums");
 const ApiError = require("../utils/ApiError");
 const { parseDateRange, startOfDay, endOfDay } = require("../utils/date");
@@ -298,6 +299,7 @@ const getCollectionReport = async (filters = {}, actor) => {
     reversedPaymentCount: effectivelyReversedCount,
     payments: paymentPage.items,
     pageInfo: paymentPage.pageInfo,
+    total: statusFilter === PAYMENT_STATUS.REVERSED ? 0 : scopedEffectiveEntries.length,
   };
 };
 
@@ -320,16 +322,32 @@ const getStaffPerformanceReport = async (filters = {}) => {
   }
 
   const staffUsers = await User.find(staffQuery).sort({ name: 1 }).lean();
-  const [profiles, effectiveContext, submissionRows] = await Promise.all([
-    StaffProfile.find({ user: { $in: staffUsers.map((staff) => staff._id) } }).lean(),
+  const staffIds = staffUsers.map((staff) => staff._id);
+  const submissionMatchBase = {
+    staff: { $in: staffIds },
+    status: CASH_SUBMISSION_STATUS.ACTIVE,
+  };
+  const submissionMatchInRange = { ...submissionMatchBase };
+  if (range.from || range.to) {
+    submissionMatchInRange.submissionDate = {};
+    if (range.from) submissionMatchInRange.submissionDate.$gte = range.from;
+    if (range.to) submissionMatchInRange.submissionDate.$lte = range.to;
+  }
+
+  const [profiles, effectiveContext, submissionRows, submissionRowsInRange] = await Promise.all([
+    StaffProfile.find({ user: { $in: staffIds } }).lean(),
     loadEffectivePaymentContext(query),
     CashSubmission.aggregate([
+      { $match: submissionMatchBase },
       {
-        $match: {
-          staff: { $in: staffUsers.map((staff) => staff._id) },
-          status: "ACTIVE",
+        $group: {
+          _id: "$staff",
+          total: { $sum: "$submittedAmount" },
         },
       },
+    ]),
+    CashSubmission.aggregate([
+      { $match: submissionMatchInRange },
       {
         $group: {
           _id: "$staff",
@@ -342,6 +360,9 @@ const getStaffPerformanceReport = async (filters = {}) => {
   const profileMap = new Map(profiles.map((profile) => [String(profile.user), profile]));
   const submittedByStaff = new Map(
     submissionRows.map((row) => [String(row._id), row.total || 0])
+  );
+  const submittedInRangeByStaff = new Map(
+    submissionRowsInRange.map((row) => [String(row._id), row.total || 0])
   );
   const custodyByStaff = await getStaffCustodyBalanceMap(
     staffUsers.map((staff) => staff._id)
@@ -417,6 +438,7 @@ const getStaffPerformanceReport = async (filters = {}) => {
       const totalCollected = breakdown.reduce((sum, row) => sum + row.total, 0);
       const paymentCount = breakdown.reduce((sum, row) => sum + row.count, 0);
       const submittedCash = submittedByStaff.get(staffId) || 0;
+      const submittedCashInRange = submittedInRangeByStaff.get(staffId) || 0;
       const cashInHand = custodyByStaff.get(staffId) ?? 0;
       const profile = profileMap.get(staffId);
 
@@ -432,6 +454,7 @@ const getStaffPerformanceReport = async (filters = {}) => {
         cashInHand,
         cashCollectedAllTime: cashCollected,
         submittedCash,
+        submittedCashInRange,
         submittedCashAllTime: submittedCash,
         pendingCash: cashInHand,
         recentPayments: recentPaymentsRaw,

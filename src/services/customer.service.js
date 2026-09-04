@@ -161,6 +161,7 @@ const mapStatusHistory = (statusHistory = []) =>
     changedBy: normalizeActor(entry.changedBy),
     changedByRole: entry.changedByRole || null,
     changedAt: entry.changedAt,
+    date: entry.changedAt,
     notes: entry.notes || "",
   }));
 

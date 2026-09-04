@@ -53,6 +53,8 @@ const { parseCursorPagination, buildCursorPage } = require("../utils/pagination"
 const {
   enrichPaymentsWithEffectiveView,
   applyEffectivePaymentRow,
+  loadEffectivePaymentContext,
+  filterEffectiveEntries,
 } = require("../utils/effectiveReadModel");
 
 const MAX_LIST_LIMIT = 200;
@@ -504,13 +506,37 @@ const listPayments = async (
   // Approximate total from the immutable payment query (before effective overlays).
   // Date/method filters are applied after enrichment, so this is an upper bound when those filters are set.
   const total = await Payment.countDocuments(query);
+
+  const effectiveFilters = {};
+  if (method) {
+    effectiveFilters.paymentMethod = method;
+  }
+  if (customRange.from || customRange.to) {
+    effectiveFilters.paymentDate = {};
+    if (customRange.from) {
+      effectiveFilters.paymentDate.$gte = customRange.from;
+    }
+    if (customRange.to) {
+      effectiveFilters.paymentDate.$lte = customRange.to;
+    }
+  }
+
+  const effectiveContext = await loadEffectivePaymentContext(query);
+  const effectiveEntries = filterEffectiveEntries(effectiveContext.entries, effectiveFilters);
+  const effectiveCount = effectiveEntries.length;
+  const totalAmount = effectiveEntries.reduce((sum, { ledger }) => sum + ledger.amount, 0);
+
   return {
     ...page,
     pageInfo: {
       ...page.pageInfo,
       total,
     },
-    summary: { count: total },
+    summary: {
+      count: total,
+      effectiveCount,
+      totalAmount,
+    },
   };
 };
 

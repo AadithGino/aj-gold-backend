@@ -277,7 +277,7 @@ describe("Corrective Phase 7 — release packaging and contract freeze", () => {
       "utf8"
     );
     assert.match(settlementService, /SETTLEMENT_AMOUNT_NOT_ALLOWED/);
-    assert.match(settlementContract, /ALLOWED_SETTLEMENT_PAYOUT_METHODS = \["CASH", "UPI", "BANK"\]/);
+    assert.match(settlementContract, /ALLOWED_SETTLEMENT_PAYOUT_METHODS = \["CASH", "UPI", "BANK", "GOLD"\]/);
     assert.doesNotMatch(settlementService, /\bbonus\b|\bpenalty\b|\bdeduction\b/i);
   });
 });

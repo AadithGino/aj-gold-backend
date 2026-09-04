@@ -4,11 +4,13 @@ const Scheme = require("../models/scheme.model");
 const Payment = require("../models/payment.model");
 const StaffProfile = require("../models/staffProfile.model");
 const CashSubmission = require("../models/cashSubmission.model");
+const CashSubmission = require("../models/cashSubmission.model");
 const {
   USER_ROLES,
   SCHEME_STATUS,
   PAYMENT_STATUS,
   PAYMENT_METHODS,
+  CASH_SUBMISSION_STATUS,
 } = require("../constants/enums");
 const ApiError = require("../utils/ApiError");
 const { startOfDay, endOfDay, startOfMonth, parseDateRange } = require("../utils/date");
@@ -109,6 +111,7 @@ const getAdminDashboard = async () => {
     recentPayments,
     staffUsers,
     topStaffRows,
+    todaySubmissionRows,
   ] = await Promise.all([
     Scheme.countDocuments({ status: SCHEME_STATUS.ACTIVE }),
     Scheme.countDocuments({
@@ -142,6 +145,15 @@ const getAdminDashboard = async () => {
         collectedByRole: USER_ROLES.STAFF,
       }
     ),
+    CashSubmission.aggregate([
+      {
+        $match: {
+          status: CASH_SUBMISSION_STATUS.ACTIVE,
+          submissionDate: { $gte: todayStart, $lte: todayEnd },
+        },
+      },
+      { $group: { _id: null, total: { $sum: "$submittedAmount" } } },
+    ]),
   ]);
 
   const today = buildTodayMethodTotals(todayBreakdown);
@@ -195,6 +207,7 @@ const getAdminDashboard = async () => {
   return {
     counts: { activeSchemes, pendingRedemptions },
     today,
+    todayFundingCashSubmitted: todaySubmissionRows[0]?.total || 0,
     ...cashPosition,
     pendingCashSubmissionSummary: {
       staffWithPendingCash: pendingCashSubmissionStaff.length,

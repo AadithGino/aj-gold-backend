@@ -1,5 +1,52 @@
 const { buildReconciliationSummary } = require("./reconciliation.service");
-const ApiError = require("../utils/ApiError");
+const { aggregateEffectiveBreakdown } = require("../utils/effectiveReadModel");
+const { PAYMENT_METHODS, USER_ROLES } = require("../constants/enums");
+
+const sumMethodTotal = (rows, method) =>
+  rows.find((row) => row.paymentMethod === method)?.total || 0;
+
+const buildCashInvariantMeta = (exceptions, negativeCashStaff, staffCustodyRows) => {
+  const staffNameById = new Map(
+    staffCustodyRows.map((row) => [String(row.staffId), row.staffName])
+  );
+  const mismatchViolations = exceptions
+    .filter((entry) => entry.code === "STAFF_CUSTODY_MISMATCH")
+    .map((entry) => ({
+      staffId: entry.staffId,
+      staffName: staffNameById.get(String(entry.staffId)) || "Staff",
+      cashInHand: entry.journalBalance ?? entry.aggregateBalance ?? 0,
+      journalCustodyBalance: entry.journalBalance,
+      aggregateCustodyBalance: entry.aggregateBalance,
+      code: entry.code,
+    }));
+
+  const negativeViolations = negativeCashStaff.map((row) => ({
+    staffId: row.staffId,
+    staffName: row.staffName,
+    cashInHand: row.journalCustodyBalance,
+    journalCustodyBalance: row.journalCustodyBalance,
+    aggregateCustodyBalance: row.aggregateCustodyBalance,
+    code: "NEGATIVE_STAFF_CUSTODY",
+  }));
+
+  const negativeCashInvariantViolations = [...negativeViolations, ...mismatchViolations];
+  const cashInvariantWarning = negativeCashInvariantViolations.length > 0 || exceptions.length > 0;
+  let cashInvariantMessage = "";
+
+  if (negativeViolations.length > 0) {
+    cashInvariantMessage = `Negative staff cash detected for ${negativeViolations.length} staff member(s).`;
+  } else if (mismatchViolations.length > 0) {
+    cashInvariantMessage = `Staff cash custody mismatch for ${mismatchViolations.length} staff member(s).`;
+  } else if (exceptions.length > 0) {
+    cashInvariantMessage = "Cash reconciliation exceptions require review.";
+  }
+
+  return {
+    cashInvariantWarning,
+    cashInvariantMessage,
+    negativeCashInvariantViolations,
+  };
+};
 
 const getSettlementTotals = async () => {
   const summary = await buildReconciliationSummary();
@@ -11,13 +58,11 @@ const getCashPositionSummary = async () => {
   const negativeCashStaff = summary.staffCustodyRows.filter(
     (row) => row.journalCustodyBalance < 0 || row.aggregateCustodyBalance < 0
   );
-
-  if (negativeCashStaff.length > 0) {
-    throw new ApiError(
-      500,
-      `Cash invariant violated for ${negativeCashStaff.length} staff member(s).`
-    );
-  }
+  const cashInvariantMeta = buildCashInvariantMeta(
+    summary.exceptions,
+    negativeCashStaff,
+    summary.staffCustodyRows
+  );
 
   const {
     accounts,
@@ -30,21 +75,35 @@ const getCashPositionSummary = async () => {
   const totalCashWithStaff = accounts.totalStaffCustody;
   const cashInVault = accounts.vault;
   const totalCustomerSettlement = flows.settlementPaid;
-  const settlementAuthorizedNotPaid = 0;
-  const authorizedNotPaidSchemes = 0;
+  const settlementAuthorizedNotPaid = accounts.settlementPayable;
+  const authorizedNotPaidSchemes = settlementAuthorizedNotPaid > 0 ? 1 : 0;
+
+  const [methodBreakdown, adminCashBreakdown] = await Promise.all([
+    aggregateEffectiveBreakdown(),
+    aggregateEffectiveBreakdown(
+      { collectedByRole: USER_ROLES.ADMIN },
+      { paymentMethod: PAYMENT_METHODS.CASH, collectedByRole: USER_ROLES.ADMIN }
+    ),
+  ]);
+
+  const totalCashCollectedFromCustomers = sumMethodTotal(methodBreakdown, PAYMENT_METHODS.CASH);
+  const totalUpiCollectedFromCustomers = sumMethodTotal(methodBreakdown, PAYMENT_METHODS.UPI);
+  const totalBankCollectedFromCustomers = sumMethodTotal(methodBreakdown, PAYMENT_METHODS.BANK);
+  const totalCardCollectedFromCustomers = sumMethodTotal(methodBreakdown, PAYMENT_METHODS.CARD);
+  const totalAdminCashCollected = sumMethodTotal(adminCashBreakdown, PAYMENT_METHODS.CASH);
 
   return {
     cashInVault,
     totalCashInVault: cashInVault,
     totalCustomerMoneyHeld: liquidPosition,
     totalCollectedFromCustomers: flows.netCustomerCollected,
-    totalCashCollectedFromCustomers: null,
-    totalUpiCollectedFromCustomers: null,
-    totalBankCollectedFromCustomers: null,
-    totalCardCollectedFromCustomers: null,
+    totalCashCollectedFromCustomers,
+    totalUpiCollectedFromCustomers,
+    totalBankCollectedFromCustomers,
+    totalCardCollectedFromCustomers,
     totalCashWithStaff,
     totalCashSubmittedToVault: flows.staffCashSubmitted,
-    totalAdminCashCollected: null,
+    totalAdminCashCollected,
     totalCustomerSettlement,
     settlementAuthorizedNotPaid,
     settlementTrackingImplemented: true,
@@ -91,7 +150,9 @@ const getCashPositionSummary = async () => {
       cashSubmitted: row.cashSubmitted,
     })),
     reconciliationExceptions: exceptions,
-    negativeCashInvariantViolations: negativeCashStaff,
+    negativeCashInvariantViolations: cashInvariantMeta.negativeCashInvariantViolations,
+    cashInvariantWarning: cashInvariantMeta.cashInvariantWarning,
+    cashInvariantMessage: cashInvariantMeta.cashInvariantMessage,
   };
 };
 
