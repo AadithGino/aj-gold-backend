@@ -15,6 +15,7 @@ const ApiError = require("../utils/ApiError");
 const { ERROR_CODES } = require("../constants/errorCodes");
 const { parseDateRange } = require("../utils/date");
 const { parsePositiveRupeeInteger } = require("../utils/money");
+const { MIN_PAYMENT_AMOUNT } = require("../config/env");
 const { withTransaction } = require("../utils/transaction");
 const { isSchemeSettled, isSchemeFinanciallyLocked } = require("../utils/scheme");
 const { logAudit } = require("./audit.service");
@@ -201,6 +202,12 @@ const collectPayment = async (payload, actor) => {
   assertCallerPaymentDateNotAllowed(payload);
 
   const amount = parsePositiveRupeeInteger(payload.amount, "amount");
+  if (amount < MIN_PAYMENT_AMOUNT) {
+    throw new ApiError(
+      400,
+      `amount must be at least ₹${MIN_PAYMENT_AMOUNT.toLocaleString("en-IN")}.`
+    );
+  }
   assertNonCashReference(payload.paymentMethod, payload.transactionReference);
   const paymentDate = new Date();
 

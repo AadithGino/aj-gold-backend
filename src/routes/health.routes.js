@@ -10,6 +10,16 @@ const { adminOnlyMiddleware } = require("../middleware/staffPermission.middlewar
 
 const router = express.Router();
 
+const { getBusinessRules } = require("../constants/businessRules");
+
+router.get("/app-config", (req, res) => {
+  res.setHeader("Cache-Control", "public, max-age=300");
+  res.status(200).json({
+    success: true,
+    data: getBusinessRules(),
+  });
+});
+
 router.get("/live", (req, res) => {
   res.setHeader("Cache-Control", "no-store");
   res.status(200).json({

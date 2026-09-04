@@ -14,6 +14,7 @@ const {
 const ApiError = require("../utils/ApiError");
 const { startOfDay, endOfDay, startOfMonth, parseDateRange } = require("../utils/date");
 const dayjs = require("dayjs");
+const { getBusinessRules } = require("../constants/businessRules");
 const {
   getPaymentMethodBreakdown,
   getStaffCashSubmissionHistory,
@@ -468,6 +469,7 @@ const getCustomerDashboard = async (user) => {
 
 /* ─── Role Profile ────────────────────────────────────────────── */
 const getRoleProfile = async (user) => {
+  const businessRules = getBusinessRules();
   const baseUser = {
     _id: user._id,
     name: user.name,
@@ -494,6 +496,7 @@ const getRoleProfile = async (user) => {
         customerCode: customer?.customerCode || "",
       },
       appVersion: APP_VERSION,
+      businessRules,
     };
   }
 
@@ -511,6 +514,7 @@ const getRoleProfile = async (user) => {
         permissions: resolveStaffPermissions(staffProfile?.permissions),
       },
       appVersion: APP_VERSION,
+      businessRules,
     };
   }
 
@@ -518,6 +522,7 @@ const getRoleProfile = async (user) => {
     user: baseUser,
     roleData: { role: USER_ROLES.ADMIN },
     appVersion: APP_VERSION,
+    businessRules,
   };
 };
 

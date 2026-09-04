@@ -99,4 +99,12 @@ module.exports = {
   FIREBASE_CLIENT_EMAIL: process.env.FIREBASE_CLIENT_EMAIL || "",
   FIREBASE_PRIVATE_KEY: process.env.FIREBASE_PRIVATE_KEY || "",
   GOOGLE_APPLICATION_CREDENTIALS: process.env.GOOGLE_APPLICATION_CREDENTIALS || "",
+  MIN_PAYMENT_AMOUNT: (() => {
+    const raw = process.env.MIN_PAYMENT_AMOUNT;
+    const parsed = raw === undefined || raw === "" ? 500 : Number(raw);
+    if (!Number.isFinite(parsed) || !Number.isInteger(parsed) || parsed <= 0) {
+      throw new Error("MIN_PAYMENT_AMOUNT must be a positive whole number.");
+    }
+    return parsed;
+  })(),
 };
