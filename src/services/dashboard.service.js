@@ -4,7 +4,6 @@ const Scheme = require("../models/scheme.model");
 const Payment = require("../models/payment.model");
 const StaffProfile = require("../models/staffProfile.model");
 const CashSubmission = require("../models/cashSubmission.model");
-const CashSubmission = require("../models/cashSubmission.model");
 const {
   USER_ROLES,
   SCHEME_STATUS,
