@@ -112,6 +112,7 @@ const getAdminDashboard = async () => {
     staffUsers,
     topStaffRows,
     todaySubmissionRows,
+    totalCustomers,
   ] = await Promise.all([
     Scheme.countDocuments({ status: SCHEME_STATUS.ACTIVE }),
     Scheme.countDocuments({
@@ -154,6 +155,7 @@ const getAdminDashboard = async () => {
       },
       { $group: { _id: null, total: { $sum: "$submittedAmount" } } },
     ]),
+    Customer.countDocuments({}),
   ]);
 
   const today = buildTodayMethodTotals(todayBreakdown);
@@ -205,7 +207,7 @@ const getAdminDashboard = async () => {
   }));
 
   return {
-    counts: { activeSchemes, pendingRedemptions },
+    counts: { activeSchemes, pendingRedemptions, totalCustomers },
     today,
     todayFundingCashSubmitted: todaySubmissionRows[0]?.total || 0,
     ...cashPosition,

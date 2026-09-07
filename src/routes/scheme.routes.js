@@ -3,7 +3,7 @@ const authMiddleware = require("../middleware/auth.middleware");
 const {
   adminOrStaffMiddleware,
   staffPermissionMiddleware,
-  staffPermissionAnyMiddleware,
+  adminOnlyMiddleware,
 } = require("../middleware/staffPermission.middleware");
 const {
   createSchemeHandler,
@@ -21,19 +21,19 @@ router.use(adminOrStaffMiddleware);
 router.post("/", staffPermissionMiddleware("canCreateCustomer"), createSchemeHandler);
 router.get(
   "/:schemeId/settlement/preview",
-  staffPermissionAnyMiddleware(["canFinalizeSettlement", "canMarkRedeemed", "canMarkClosed"]),
+  adminOnlyMiddleware,
   previewSettlementHandler
 );
 router.get(
   "/:schemeId/settlement/detail",
-  staffPermissionAnyMiddleware(["canFinalizeSettlement", "canMarkRedeemed", "canMarkClosed"]),
+  adminOnlyMiddleware,
   getSettlementDetailHandler
 );
 router.get(
   "/:schemeId",
-  staffPermissionAnyMiddleware(["canFinalizeSettlement", "canMarkRedeemed", "canMarkClosed"]),
+  adminOnlyMiddleware,
   getSchemeHandler
 );
-router.patch("/:schemeId/status", updateSchemeStatusHandler);
+router.patch("/:schemeId/status", adminOnlyMiddleware, updateSchemeStatusHandler);
 
 module.exports = router;

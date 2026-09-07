@@ -54,7 +54,8 @@ const appendStatusHistory = (scheme, { status, changedBy, changedByRole, notes, 
   return scheme;
 };
 
-const createEnrollmentNumber = async (date = new Date()) => generateEnrollmentNumber(date);
+const createEnrollmentNumber = async (date = new Date(), session = null) =>
+  generateEnrollmentNumber(date, session);
 
 module.exports = {
   calculateSchemeDates,

@@ -430,7 +430,19 @@ describe("Phase 3 — collection references and fail-closed permissions", () => 
         clientRequestId: reqId(),
       },
     });
-    assert.equal(closeWithoutPayoutRef.status, 200);
+    assert.equal(closeWithoutPayoutRef.status, 403);
+
+    const adminClose = await httpRequest({
+      method: "PATCH",
+      path: `/api/schemes/${scheme._id}/status`,
+      token: signAccessToken(admin),
+      body: {
+        status: "CLOSED",
+        payoutMethod: PAYMENT_METHODS.UPI,
+        clientRequestId: reqId(),
+      },
+    });
+    assert.equal(adminClose.status, 200);
   });
 
   it("customer payment creation remains denied", async () => {

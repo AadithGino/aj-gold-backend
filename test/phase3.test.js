@@ -217,7 +217,7 @@ describe("Phase 3 settlement and journal", () => {
     );
   });
 
-  it("allows early CLOSED settlement with same principal formula", async () => {
+  it("allows early CLOSED settlement retaining 5% of principal", async () => {
     const admin = await createAdmin();
     const customer = await createCustomer(
       {
@@ -243,7 +243,7 @@ describe("Phase 3 settlement and journal", () => {
       settlePayload({ status: SCHEME_STATUS.CLOSED }),
       admin
     );
-    assert.equal(settled.settlement.amount, 6000);
+    assert.equal(settled.settlement.amount, 5700);
     assert.equal(settled.status, SCHEME_STATUS.CLOSED);
   });
 
@@ -320,17 +320,29 @@ describe("Phase 3 settlement and journal", () => {
     assert.equal(paidEntries.length, 1);
   });
 
-  it("staff can execute full settlement workflow without separate approver", async () => {
+  it("staff cannot execute settlement; admin finalizes without a separate approver", async () => {
     const admin = await createAdmin();
     const staff = await createStaff();
     const { customer, scheme } = await seedCustomerScheme(admin);
     await pay(customer, scheme, staff, 4500, PAYMENT_METHODS.CASH);
 
+    await assert.rejects(
+      () =>
+        withMockedNow(maturityTime(), () =>
+          updateSchemeStatus(
+            scheme._id,
+            settlePayload({ payoutMethod: PAYMENT_METHODS.CASH, payoutReference: undefined }),
+            staff
+          )
+        ),
+      (error) => error.statusCode === 403
+    );
+
     const settled = await withMockedNow(maturityTime(), () =>
       updateSchemeStatus(
         scheme._id,
         settlePayload({ payoutMethod: PAYMENT_METHODS.CASH, payoutReference: undefined }),
-        staff
+        admin
       )
     );
 

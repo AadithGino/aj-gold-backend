@@ -74,6 +74,31 @@ describe("Customer self-register and deletion request", () => {
     );
   });
 
+  it("duplicate phone registration does not consume a passbook number", async () => {
+    const ReceiptCounter = require("../src/models/receiptCounter.model");
+    const { PASSBOOK_COUNTER_KEY } = require("../src/services/receipt.service");
+    const phone = `7${String(Date.now()).slice(-9)}`;
+    const first = await register({ name: "One", phone, password: "custpass1" });
+
+    const before = await ReceiptCounter.findOne({ key: PASSBOOK_COUNTER_KEY });
+    await assert.rejects(
+      () => register({ name: "Two", phone, password: "custpass1" }),
+      (error) => error.statusCode === 409
+    );
+    const after = await ReceiptCounter.findOne({ key: PASSBOOK_COUNTER_KEY });
+    assert.equal(after.seq, before.seq);
+
+    const next = await register({
+      name: "Three",
+      phone: `7${String(Date.now() + 1).slice(-9)}`,
+      password: "custpass1",
+    });
+    assert.equal(
+      Number(next.customer.passbookNumber),
+      Number(first.customer.passbookNumber) + 1
+    );
+  });
+
   it("lets a customer create and cancel a deletion request", async () => {
     const phone = `7${String(Date.now()).slice(-9)}`;
     const { user } = await register({ name: "Delete Me", phone, password: "custpass1" });

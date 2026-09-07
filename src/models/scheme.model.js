@@ -16,6 +16,8 @@ const settlementSchema = new mongoose.Schema(
     payoutEvidence: { type: mongoose.Schema.Types.Mixed, default: null },
     settlementReceiptId: { type: String, trim: true, default: "" },
     settlementCategory: { type: String, trim: true, default: "" },
+    earlyClosureRetained: { type: Number, min: 0, default: 0 },
+    eligibleContributions: { type: Number, min: 0 },
   },
   { _id: false }
 );
@@ -35,7 +37,7 @@ const schemeSchema = new mongoose.Schema(
   {
     customer: { type: mongoose.Schema.Types.ObjectId, ref: "Customer", index: true, required: true },
     enrollmentNumber: { type: String, unique: true, index: true, required: true, trim: true },
-    schemeName: { type: String, default: "Gold Savings Scheme", trim: true },
+    schemeName: { type: String, default: "AJ Gold Scheme", trim: true },
     startDate: { type: Date, required: true },
     sixMonthDate: { type: Date, required: true },
     maturityDate: { type: Date, required: true },

@@ -10,6 +10,13 @@ const DEFAULT_STAFF_PERMISSIONS = {
 
 const STAFF_PERMISSION_KEYS = Object.keys(DEFAULT_STAFF_PERMISSIONS);
 
+/** Retired keys stay in the payload as false so older app builds do not crash. */
+const RETIRED_STAFF_PERMISSIONS = {
+  canMarkRedeemed: false,
+  canMarkClosed: false,
+  canFinalizeSettlement: false,
+};
+
 /** Existing keys that may look up a customer/scheme to complete an approved workflow. */
 const CUSTOMER_LOOKUP_PERMISSIONS = [
   "canCollectPayment",
@@ -21,11 +28,16 @@ const CUSTOMER_LOOKUP_PERMISSIONS = [
 
 const resolveStaffPermissions = (permissions = {}) => {
   const stored = permissions?.toObject?.() || permissions || {};
-  const merged = { ...DEFAULT_STAFF_PERMISSIONS, ...stored };
+  const merged = { ...DEFAULT_STAFF_PERMISSIONS, ...stored, ...RETIRED_STAFF_PERMISSIONS };
 
   return Object.fromEntries(
     STAFF_PERMISSION_KEYS.map((key) => [key, merged[key] === true])
   );
+};
+
+const sanitizeWritableStaffPermissions = (permissions = {}) => {
+  const stored = permissions?.toObject?.() || permissions || {};
+  return resolveStaffPermissions(stored);
 };
 
 const hasStaffPermission = (profile, permissionKey) => {
@@ -36,7 +48,9 @@ const hasStaffPermission = (profile, permissionKey) => {
 module.exports = {
   DEFAULT_STAFF_PERMISSIONS,
   STAFF_PERMISSION_KEYS,
+  RETIRED_STAFF_PERMISSIONS,
   CUSTOMER_LOOKUP_PERMISSIONS,
   resolveStaffPermissions,
+  sanitizeWritableStaffPermissions,
   hasStaffPermission,
 };

@@ -75,6 +75,9 @@ const listCustomersHandler = asyncHandler(async (req, res) => {
     paginated: true,
     cursor: req.query.cursor,
     limit: req.query.limit,
+    sixMonthPhase: req.query.sixMonthPhase,
+    schemeFilter: req.query.schemeFilter,
+    createdBy: req.query.createdBy,
   });
 
   return res.status(200).json({

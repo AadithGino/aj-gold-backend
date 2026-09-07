@@ -304,6 +304,118 @@ describe("Phase 5 auth and permission guardrails", () => {
     );
   });
 
+  it("duplicate phone create does not consume a passbook number", async () => {
+    const ReceiptCounter = require("../src/models/receiptCounter.model");
+    const { PASSBOOK_COUNTER_KEY } = require("../src/services/receipt.service");
+    const admin = await createAdmin();
+    const first = await createCustomer(
+      { name: "First Customer", phone: `7${String(Date.now()).slice(-9)}` },
+      admin
+    );
+
+    const before = await ReceiptCounter.findOne({ key: PASSBOOK_COUNTER_KEY });
+    await assert.rejects(
+      () => createCustomer({ name: "Duplicate Phone", phone: first.phone }, admin),
+      (error) => error.statusCode === 409
+    );
+    const after = await ReceiptCounter.findOne({ key: PASSBOOK_COUNTER_KEY });
+    assert.equal(after.seq, before.seq);
+
+    const next = await createCustomer(
+      { name: "Next Customer", phone: `7${String(Date.now() + 1).slice(-9)}` },
+      admin
+    );
+    assert.equal(Number(next.passbookNumber), Number(first.passbookNumber) + 1);
+  });
+
+  it("duplicate staff phone does not consume an employee code", async () => {
+    const ReceiptCounter = require("../src/models/receiptCounter.model");
+    const admin = await createAdmin();
+    const phone = `8${String(Date.now()).slice(-9)}`;
+    const first = await createStaff(
+      { name: "Staff One", phone, password: "staffpass1" },
+      admin
+    );
+    const year = new Date().getFullYear();
+    const before = await ReceiptCounter.findOne({ key: `employee-${year}` });
+
+    await assert.rejects(
+      () => createStaff({ name: "Staff Two", phone, password: "staffpass1" }, admin),
+      (error) => error.statusCode === 409
+    );
+
+    const after = await ReceiptCounter.findOne({ key: `employee-${year}` });
+    assert.equal(after.seq, before.seq);
+
+    const next = await createStaff(
+      {
+        name: "Staff Three",
+        phone: `8${String(Date.now() + 1).slice(-9)}`,
+        password: "staffpass1",
+      },
+      admin
+    );
+    assert.equal(
+      Number(next.profile.employeeCode.split("-").pop()),
+      Number(first.profile.employeeCode.split("-").pop()) + 1
+    );
+  });
+
+  it("invalid staff password does not consume an employee code", async () => {
+    const ReceiptCounter = require("../src/models/receiptCounter.model");
+    const admin = await createAdmin();
+    await createStaff(
+      {
+        name: "Staff One",
+        phone: `8${String(Date.now()).slice(-9)}`,
+        password: "staffpass1",
+      },
+      admin
+    );
+    const year = new Date().getFullYear();
+    const before = await ReceiptCounter.findOne({ key: `employee-${year}` });
+
+    await assert.rejects(
+      () =>
+        createStaff(
+          {
+            name: "Staff Two",
+            phone: `8${String(Date.now() + 1).slice(-9)}`,
+            password: "short",
+          },
+          admin
+        ),
+      (error) => error.statusCode === 400
+    );
+
+    const after = await ReceiptCounter.findOne({ key: `employee-${year}` });
+    assert.equal(after.seq, before.seq);
+  });
+
+  it("duplicate active scheme does not consume an enrollment number", async () => {
+    const ReceiptCounter = require("../src/models/receiptCounter.model");
+    const { businessYear } = require("../src/utils/date");
+    const admin = await createAdmin();
+    const customer = await createCustomer(
+      { name: "Scheme Customer", phone: `7${String(Date.now()).slice(-9)}` },
+      admin
+    );
+    const first = await createScheme(
+      { customerId: customer._id, clientRequestId: reqId() },
+      admin
+    );
+    const key = `enrollment-${businessYear(first.startDate)}`;
+    const before = await ReceiptCounter.findOne({ key });
+
+    await assert.rejects(
+      () => createScheme({ customerId: customer._id, clientRequestId: reqId() }, admin),
+      (error) => error.statusCode === 409
+    );
+
+    const after = await ReceiptCounter.findOne({ key });
+    assert.equal(after.seq, before.seq);
+  });
+
   it("User/Customer update rolls back together on duplicate phone fault", async () => {
     const admin = await createAdmin();
     const first = await createCustomer(

@@ -1,10 +1,8 @@
 const Scheme = require("../models/scheme.model");
 const mongoose = require("mongoose");
-const StaffProfile = require("../models/staffProfile.model");
 const {
   SCHEME_STATUS,
   USER_ROLES,
-  PAYMENT_METHODS,
   SETTLEMENT_WORKFLOW_STATUS,
   JOURNAL_EVENT_TYPES,
   AUDIT_ACTIONS,
@@ -14,7 +12,6 @@ const { JOURNAL_ACCOUNTS } = require("../constants/journalAccounts");
 const { SETTLEMENT_CONTRACT, ALLOWED_SETTLEMENT_PAYOUT_METHODS } = require("../constants/settlementContract");
 const ApiError = require("../utils/ApiError");
 const { ERROR_CODES } = require("../constants/errorCodes");
-const { hasStaffPermission } = require("../constants/staffPermissions");
 const { withTransaction } = require("../utils/transaction");
 const { isSchemeSettled, isSchemeFinanciallyLocked } = require("../utils/scheme");
 const { generateSettlementReceiptNumber } = require("./receipt.service");
@@ -44,30 +41,15 @@ const LEGACY_INTERMEDIATE_STATUSES = new Set([
   "PAID",
 ]);
 
-const assertSettlementActorAllowed = async (actor, settlementType) => {
-  if (actor.role === USER_ROLES.ADMIN) {
+const assertSettlementActorAllowed = async (actor) => {
+  if (actor?.role === USER_ROLES.ADMIN) {
     return;
   }
 
-  if (actor.role !== USER_ROLES.STAFF) {
-    throw new ApiError(403, "Only admin or authorized staff can settle schemes.");
-  }
-
-  const profile = await StaffProfile.findOne({ user: actor._id });
-  if (!profile) {
-    throw new ApiError(403, "Staff profile not found.");
-  }
-
-  if (!hasStaffPermission(profile, "canFinalizeSettlement")) {
-    throw new ApiError(403, "Staff does not have settlement finalization permission.");
-  }
-
-  if (settlementType === SCHEME_STATUS.REDEEMED && !hasStaffPermission(profile, "canMarkRedeemed")) {
-    throw new ApiError(403, "Staff does not have redeem permission.");
-  }
-  if (settlementType === SCHEME_STATUS.CLOSED && !hasStaffPermission(profile, "canMarkClosed")) {
-    throw new ApiError(403, "Staff does not have early closure permission.");
-  }
+  throw new ApiError(403, "Only admin can settle schemes.", [], {
+    code: ERROR_CODES.FORBIDDEN,
+    retryable: false,
+  });
 };
 
 const assertPayoutPayload = (payload) => {
@@ -161,12 +143,15 @@ const writeSettlementJournalEntries = async ({
   const journalEntryIds = [];
   const baseKey = `scheme:${scheme._id}`;
   const now = new Date();
+  const principal = entitlement.eligibleContributions;
+  const retained = entitlement.earlyClosureRetained || 0;
+  const payoutAmount = entitlement.finalEntitlement;
 
   const entitlementEntry = await appendJournalEntry(
     {
       businessKey: `${baseKey}:entitlement:${clientRequestId}`,
       eventType: JOURNAL_EVENT_TYPES.SETTLEMENT_ENTITLEMENT_RECOGNIZED,
-      amount: entitlement.finalEntitlement,
+      amount: principal,
       debitAccount: JOURNAL_ACCOUNTS.CUSTOMER_SCHEME_LIABILITY,
       creditAccount: JOURNAL_ACCOUNTS.SETTLEMENT_PAYABLE,
       customer: customerId,
@@ -185,11 +170,35 @@ const writeSettlementJournalEntries = async ({
   );
   journalEntryIds.push(entitlementEntry._id);
 
+  if (retained > 0) {
+    const retainedEntry = await appendJournalEntry(
+      {
+        businessKey: `${baseKey}:early-retained:${clientRequestId}`,
+        eventType: JOURNAL_EVENT_TYPES.SETTLEMENT_EARLY_CLOSURE_RETAINED,
+        amount: retained,
+        debitAccount: JOURNAL_ACCOUNTS.SETTLEMENT_PAYABLE,
+        creditAccount: JOURNAL_ACCOUNTS.EARLY_CLOSURE_RETAINED,
+        customer: customerId,
+        scheme: scheme._id,
+        sourceRecordType: "Scheme",
+        sourceRecordId: scheme._id,
+        actor: actor._id,
+        actorRole: actor.role,
+        clientRequestId,
+        effectiveAt: now,
+        formulaVersion: entitlement.formulaVersion,
+        metadata: { settlementType: payout.settlementType },
+      },
+      session
+    );
+    journalEntryIds.push(retainedEntry._id);
+  }
+
   const paidEntry = await appendJournalEntry(
     {
       businessKey: `${baseKey}:paid:${clientRequestId}`,
       eventType: JOURNAL_EVENT_TYPES.SETTLEMENT_PAID,
-      amount: entitlement.finalEntitlement,
+      amount: payoutAmount,
       debitAccount: JOURNAL_ACCOUNTS.SETTLEMENT_PAYABLE,
       creditAccount: JOURNAL_ACCOUNTS.VAULT,
       customer: customerId,
@@ -215,12 +224,16 @@ const writeSettlementJournalEntries = async ({
   return journalEntryIds;
 };
 
-const previewEntitlement = async (schemeId) => {
+const previewEntitlement = async (schemeId, { forStatus } = {}) => {
   const scheme = await Scheme.findById(schemeId);
   if (!scheme) {
     throw new ApiError(404, "Scheme not found.");
   }
-  const entitlement = await computeEntitlement(schemeId);
+  const settlementType =
+    forStatus === SCHEME_STATUS.CLOSED || forStatus === SCHEME_STATUS.REDEEMED
+      ? forStatus
+      : null;
+  const entitlement = await computeEntitlement(schemeId, { settlementType });
   return {
     schemeId: scheme._id,
     enrollmentNumber: scheme.enrollmentNumber,
@@ -236,7 +249,12 @@ const getSettlementDetail = async (schemeId) => {
   }
 
   const [entitlement, journalEntries] = await Promise.all([
-    computeEntitlement(schemeId),
+    computeEntitlement(schemeId, {
+      settlementType:
+        scheme.status === SCHEME_STATUS.CLOSED || scheme.status === SCHEME_STATUS.REDEEMED
+          ? scheme.status
+          : null,
+    }),
     getJournalEntriesForScheme(schemeId),
   ]);
 
@@ -260,7 +278,7 @@ const completeSettlement = async (schemeId, payload, actor) => {
     });
   }
 
-  await assertSettlementActorAllowed(actor, payload.status);
+  await assertSettlementActorAllowed(actor);
 
   const trimmedNotes = payload.notes?.trim() || "";
 
@@ -307,7 +325,10 @@ const completeSettlement = async (schemeId, payload, actor) => {
     await ensureNoLegacyIntermediateWorkflow(scheme, session);
     assertSettlementEligibility(scheme, payload.status);
 
-    const entitlement = await computeEntitlement(scheme._id, session);
+    const entitlement = await computeEntitlement(scheme._id, {
+      session,
+      settlementType: payload.status,
+    });
     if (entitlement.finalEntitlement <= 0) {
       throw new ApiError(400, "No eligible contributions to settle.", [], {
         code: ERROR_CODES.SETTLEMENT_NOT_ELIGIBLE,
@@ -354,6 +375,8 @@ const completeSettlement = async (schemeId, payload, actor) => {
       payoutEvidence,
       settlementReceiptId,
       settlementCategory: settlementCategoryForType(payload.status),
+      earlyClosureRetained: entitlement.earlyClosureRetained || 0,
+      eligibleContributions: entitlement.eligibleContributions,
     };
     scheme.settlementWorkflow = {
       status: SETTLEMENT_WORKFLOW_STATUS.FINALIZED,

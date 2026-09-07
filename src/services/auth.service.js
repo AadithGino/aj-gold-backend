@@ -112,6 +112,47 @@ const me = async (user) => ({
   },
 });
 
+const changePassword = async ({ currentPassword, newPassword }, actor) => {
+  if (!actor || ![USER_ROLES.ADMIN, USER_ROLES.STAFF].includes(actor.role)) {
+    throw new ApiError(403, "Only admin and staff can change password here.");
+  }
+  if (!currentPassword || !newPassword) {
+    throw new ApiError(400, "Current password and new password are required.");
+  }
+  if (String(currentPassword) === String(newPassword)) {
+    throw new ApiError(400, "New password must be different from the current password.");
+  }
+  assertPrivilegedPassword(newPassword);
+
+  const user = await User.findById(actor._id).select("name phone role status tokenVersion +passwordHash");
+  if (!user) {
+    throw new ApiError(404, "User not found.");
+  }
+  if (!user.passwordHash) {
+    throw new ApiError(401, "Current password is incorrect.");
+  }
+
+  const match = await bcrypt.compare(String(currentPassword), user.passwordHash);
+  if (!match) {
+    throw new ApiError(401, "Current password is incorrect.");
+  }
+
+  user.passwordHash = await bcrypt.hash(String(newPassword), 10);
+  user.tokenVersion = (user.tokenVersion || 0) + 1;
+  await user.save();
+
+  await logAudit({
+    actor: user._id,
+    actorRole: user.role,
+    action: AUDIT_ACTIONS.PASSWORD_CHANGED,
+    targetType: "User",
+    targetId: user._id,
+    notes: "Password changed by account owner",
+  });
+
+  return buildAuthResponse(user);
+};
+
 const register = async (payload, { ip } = {}) => {
   const { registerCustomer } = require("./customer.service");
   const phone = payload?.phone?.trim();
@@ -143,6 +184,7 @@ module.exports = {
   register,
   logout,
   me,
+  changePassword,
   assertPasswordStrength,
   generateTemporaryPassword,
   signAccessToken,

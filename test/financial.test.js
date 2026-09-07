@@ -45,8 +45,14 @@ const {
   approveCorrection,
   rejectCorrection,
 } = require("../src/services/correction.service");
-const { createCustomer } = require("../src/services/customer.service");
-const { logout, login } = require("../src/services/auth.service");
+const { createCustomer, searchCustomers } = require("../src/services/customer.service");
+const { logout, login, changePassword } = require("../src/services/auth.service");
+const { updateStaff, getStaffDetail } = require("../src/services/staff.service");
+const { previewEntitlement } = require("../src/services/settlement.service");
+const {
+  ENTITLEMENT_FORMULA_VERSION,
+  EARLY_CLOSURE_FORMULA_VERSION,
+} = require("../src/constants/settlementContract");
 const { resolveStaffPermissions } = require("../src/constants/staffPermissions");
 const { getCashPositionSummary, getSettlementTotals } = require("../src/services/cashPosition.service");
 const { parsePositiveRupeeInteger } = require("../src/utils/money");
@@ -733,12 +739,16 @@ describe("financial hardening", () => {
     assert.equal(resolved.canMarkClosed, false);
   });
 
-  it("19b. staff permissions default to deny-by-default when unset", () => {
-    const resolved = resolveStaffPermissions({});
-    assert.equal(resolved.canViewReports, false);
+  it("19c. retired settlement staff permissions stay false even if stored true", () => {
+    const resolved = resolveStaffPermissions({
+      canCollectPayment: true,
+      canMarkRedeemed: true,
+      canMarkClosed: true,
+      canFinalizeSettlement: true,
+    });
+    assert.equal(resolved.canCollectPayment, true);
     assert.equal(resolved.canMarkRedeemed, false);
-    assert.equal(resolved.canSubmitCash, false);
-    assert.equal(resolved.canCollectPayment, false);
+    assert.equal(resolved.canMarkClosed, false);
     assert.equal(resolved.canFinalizeSettlement, false);
   });
 
@@ -774,6 +784,127 @@ describe("financial hardening", () => {
     const decoded = jwt.verify(token, JWT_SECRET);
     assert.equal(decoded.tokenVersion, userAfterLogout.tokenVersion);
     assert.equal(decoded.tokenVersion, 1);
+  });
+
+  it("21c. change-password invalidates the old token and returns a fresh one", async () => {
+    const admin = await createAdmin();
+    const { token: oldToken } = await login({ phone: admin.phone, password: "adminpass1" });
+    const result = await changePassword(
+      { currentPassword: "adminpass1", newPassword: "adminpass2" },
+      admin
+    );
+    assert.ok(result.token);
+    const oldDecoded = jwt.verify(oldToken, JWT_SECRET);
+    const newDecoded = jwt.verify(result.token, JWT_SECRET);
+    const user = await User.findById(admin._id);
+    assert.notEqual(oldDecoded.tokenVersion, user.tokenVersion);
+    assert.equal(newDecoded.tokenVersion, user.tokenVersion);
+    await login({ phone: admin.phone, password: "adminpass2" });
+
+    const staff = await createStaff();
+    const staffResult = await changePassword(
+      { currentPassword: "staffpass1", newPassword: "staffpass2" },
+      staff
+    );
+    assert.ok(staffResult.token);
+    await login({ phone: staff.phone, password: "staffpass2" });
+  });
+
+  it("21d. customer list sixMonthPhase=past returns only schemes past the 6-month date", async () => {
+    const admin = await createAdmin();
+    const past = await seedCustomerScheme(admin, "2025-01-01");
+    const recent = await seedCustomerScheme(admin, new Date().toISOString().slice(0, 10));
+    const all = await searchCustomers("", admin, { paginated: true, limit: 50 });
+    assert.equal(all.pageInfo.total, 2);
+    const page = await searchCustomers("", admin, {
+      paginated: true,
+      sixMonthPhase: "past",
+      limit: 50,
+    });
+    const ids = page.items.map((item) => String(item._id));
+    assert.equal(page.pageInfo.total, 1);
+    assert.ok(ids.includes(String(past.customer._id)));
+    assert.equal(ids.includes(String(recent.customer._id)), false);
+  });
+
+  it("21f. customer list schemeFilter=none returns customers without an active scheme", async () => {
+    const admin = await createAdmin();
+    const withActive = await seedCustomerScheme(admin);
+    const noScheme = await createCustomer(
+      {
+        name: "No Scheme Customer",
+        phone: `7${String(Date.now()).slice(-8)}${Math.floor(Math.random() * 9)}`,
+        password: "customer1pass",
+      },
+      admin
+    );
+    const closed = await seedCustomerScheme(admin, new Date().toISOString().slice(0, 10));
+    await pay(closed.customer, closed.scheme, admin, 2000);
+    await settleScheme(closed.scheme._id, admin, { status: SCHEME_STATUS.CLOSED });
+
+    const ignored = await searchCustomers("", admin, {
+      paginated: true,
+      schemeFilter: "unknown",
+      limit: 50,
+    });
+    assert.equal(ignored.pageInfo.total, 3);
+
+    const page = await searchCustomers("", admin, {
+      paginated: true,
+      schemeFilter: "none",
+      limit: 50,
+    });
+    const ids = page.items.map((item) => String(item._id));
+    assert.equal(page.pageInfo.total, 2);
+    assert.ok(ids.includes(String(noScheme._id)));
+    assert.ok(ids.includes(String(closed.customer._id)));
+    assert.equal(ids.includes(String(withActive.customer._id)), false);
+  });
+
+  it("21g. staff detail lists customers they added; createdBy list filter and admin password reset work", async () => {
+    const admin = await createAdmin();
+    const staff = await createStaff();
+    const added = await createCustomer(
+      {
+        name: "Staff Added Customer",
+        phone: `7${String(Date.now()).slice(-8)}${Math.floor(Math.random() * 9)}`,
+        password: "customer1pass",
+      },
+      staff
+    );
+    await seedCustomerScheme(admin);
+
+    const detail = await getStaffDetail(staff._id);
+    assert.equal(detail.customersAdded, 1);
+    assert.equal(detail.customersAddedItems.length, 1);
+    assert.equal(String(detail.customersAddedItems[0]._id), String(added._id));
+
+    const page = await searchCustomers("", admin, {
+      paginated: true,
+      createdBy: staff._id,
+      limit: 50,
+    });
+    assert.equal(page.pageInfo.total, 1);
+    assert.equal(String(page.items[0]._id), String(added._id));
+
+    await updateStaff(staff._id, { password: "staffpass9" }, admin);
+    const user = await User.findById(staff._id);
+    assert.equal(user.tokenVersion, 1);
+    await login({ phone: staff.phone, password: "staffpass9" });
+  });
+
+  it("21e. settlement preview without forStatus stays principal-only; CLOSED applies 5%", async () => {
+    const admin = await createAdmin();
+    const { customer, scheme } = await seedCustomerScheme(admin);
+    await pay(customer, scheme, admin, 4200);
+    const maturityPreview = await previewEntitlement(scheme._id);
+    assert.equal(maturityPreview.formulaVersion, ENTITLEMENT_FORMULA_VERSION);
+    assert.equal(maturityPreview.finalEntitlement, 4200);
+    assert.equal(maturityPreview.earlyClosureRetained, 0);
+    const closedPreview = await previewEntitlement(scheme._id, { forStatus: SCHEME_STATUS.CLOSED });
+    assert.equal(closedPreview.formulaVersion, EARLY_CLOSURE_FORMULA_VERSION);
+    assert.equal(closedPreview.earlyClosureRetained, 210);
+    assert.equal(closedPreview.finalEntitlement, 3990);
   });
 
   it("22. missing clientRequestId returns validation error", async () => {

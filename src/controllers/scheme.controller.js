@@ -59,7 +59,9 @@ const updateSchemeStatusHandler = asyncHandler(async (req, res) => {
 });
 
 const previewSettlementHandler = asyncHandler(async (req, res) => {
-  const preview = await previewEntitlement(req.params.schemeId);
+  const preview = await previewEntitlement(req.params.schemeId, {
+    forStatus: req.query.forStatus,
+  });
   return res.status(200).json({
     success: true,
     data: preview,

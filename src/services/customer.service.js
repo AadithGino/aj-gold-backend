@@ -101,9 +101,9 @@ const sanitizeCustomer = (customer) => ({
   updatedAt: customer.updatedAt,
 });
 
-const generateCustomerCode = async (date = new Date()) => {
+const generateCustomerCode = async (date = new Date(), session = null) => {
   const year = date.getFullYear();
-  const seq = await getNextSequence(`customer-${year}`);
+  const seq = await getNextSequence(`customer-${year}`, session);
   return `AJGK-CUST-${year}-${String(seq).padStart(4, "0")}`;
 };
 
@@ -222,6 +222,8 @@ const enrichScheme = async (scheme) => {
           payoutEvidence: scheme.settlement.payoutEvidence || null,
           settlementReceiptId: scheme.settlement.settlementReceiptId || "",
           settlementCategory: scheme.settlement.settlementCategory || "",
+          earlyClosureRetained: scheme.settlement.earlyClosureRetained || 0,
+          eligibleContributions: scheme.settlement.eligibleContributions,
         }
       : null,
     settlementWorkflow: scheme.settlementWorkflow || null,
@@ -246,30 +248,36 @@ const createCustomer = async (payload, actor) => {
   }
 
   const phone = payload.phone.trim();
-  const passbookNumber = await generatePassbookNumber();
-
-  const existingPassbook = await Customer.findOne({ passbookNumber });
-  if (existingPassbook) {
-    throw new ApiError(409, "Passbook number already exists.");
-  }
-
   const existingPhone = await User.findOne({ phone });
   if (existingPhone) {
     throw new ApiError(409, "Phone number is already registered.");
   }
 
-  const initialPassword = payload.password?.trim() || passbookNumber;
-  const temporaryPasswordReturned = payload.password?.trim() ? null : initialPassword;
-  if (payload.password?.trim()) {
-    assertCustomerPassword(initialPassword);
+  const customPassword = payload.password?.trim() || "";
+  if (customPassword) {
+    assertCustomerPassword(customPassword);
   }
-  const passwordHash = await bcrypt.hash(initialPassword, 10);
-  const customerCode = await generateCustomerCode();
 
   const session = await mongoose.startSession();
   session.startTransaction();
 
   try {
+    const passbookNumber = await generatePassbookNumber(session);
+    const existingPassbook = await Customer.findOne({ passbookNumber }).session(session);
+    if (existingPassbook) {
+      throw new ApiError(409, "Passbook number already exists.");
+    }
+
+    const phoneTaken = await User.findOne({ phone }).session(session);
+    if (phoneTaken) {
+      throw new ApiError(409, "Phone number is already registered.");
+    }
+
+    const initialPassword = customPassword || passbookNumber;
+    const temporaryPasswordReturned = customPassword ? null : initialPassword;
+    const passwordHash = await bcrypt.hash(initialPassword, 10);
+    const customerCode = await generateCustomerCode(new Date(), session);
+
     const [user] = await User.create(
       [
         {
@@ -355,21 +363,27 @@ const registerCustomer = async (payload) => {
   }
   assertCustomerPassword(String(password));
 
-  const passbookNumber = await generatePassbookNumber();
-  const existingPassbook = await Customer.findOne({ passbookNumber });
-  if (existingPassbook) {
-    throw new ApiError(409, "Passbook number already exists.");
-  }
-
   const existingPhone = await User.findOne({ phone });
   if (existingPhone) {
     throw new ApiError(409, "Phone number is already registered.");
   }
 
   const passwordHash = await bcrypt.hash(String(password), 10);
-  const customerCode = await generateCustomerCode();
 
   const { user, customer } = await withTransaction(async (session) => {
+    const passbookNumber = await generatePassbookNumber(session);
+    const existingPassbook = await Customer.findOne({ passbookNumber }).session(session);
+    if (existingPassbook) {
+      throw new ApiError(409, "Passbook number already exists.");
+    }
+
+    const phoneTaken = await User.findOne({ phone }).session(session);
+    if (phoneTaken) {
+      throw new ApiError(409, "Phone number is already registered.");
+    }
+
+    const customerCode = await generateCustomerCode(new Date(), session);
+
     const [createdUser] = await User.create(
       [
         {
@@ -552,20 +566,84 @@ const resetCustomerPassword = async (customerId, newPassword, actor) => {
   };
 };
 
+const resolveCustomerListFilter = (options = {}) => {
+  const schemeFilter = String(options.schemeFilter || "").trim();
+  if (schemeFilter === "none") return "none";
+  if (schemeFilter === "past" || options.sixMonthPhase === "past") return "past";
+  return "";
+};
+
+const resolveCreatedByFilter = (value) => {
+  if (value == null || value === "") return null;
+  const raw = String(value).trim();
+  if (!mongoose.Types.ObjectId.isValid(raw)) {
+    throw new ApiError(400, "Invalid createdBy.");
+  }
+  return new mongoose.Types.ObjectId(raw);
+};
+
+const constrainCustomerIds = (query, ids, { exclude = false } = {}) => {
+  const incoming = Array.isArray(ids) ? ids : [];
+  if (exclude) {
+    if (query._id?.$in) {
+      const blocked = new Set(incoming.map((id) => String(id)));
+      query._id = {
+        $in: query._id.$in.filter((id) => !blocked.has(String(id))),
+      };
+      return;
+    }
+    query._id = { $nin: incoming };
+    return;
+  }
+  if (query._id?.$in) {
+    const allowed = new Set(incoming.map((id) => String(id)));
+    query._id = {
+      $in: query._id.$in.filter((id) => allowed.has(String(id))),
+    };
+    return;
+  }
+  if (query._id?.$nin) {
+    const blocked = new Set(query._id.$nin.map((id) => String(id)));
+    query._id = {
+      $in: incoming.filter((id) => !blocked.has(String(id))),
+    };
+    return;
+  }
+  query._id = { $in: incoming };
+};
+
 const searchCustomers = async (search = "", actor = null, options = {}) => {
   const accessMode = await assertCustomerSearchAccess(actor, search);
   const { paginated = false } = options;
+  const listFilter = resolveCustomerListFilter(options);
+  const createdBy = resolveCreatedByFilter(options.createdBy);
   const term = parseSafeSearchTerm(search, { label: "search" });
   const query = {};
+  if (createdBy) {
+    query.createdBy = createdBy;
+  }
   if (term) {
     const regex = new RegExp(term, "i");
     query.$or = [{ name: regex }, { phone: regex }, { passbookNumber: regex }];
-  } else if (accessMode === "collection") {
+  } else if (accessMode === "collection" && listFilter !== "none") {
     // Staff default list: only customers with an active scheme (search still finds any match).
     const activeCustomerIds = await Scheme.distinct("customer", {
       status: SCHEME_STATUS.ACTIVE,
     });
     query._id = { $in: activeCustomerIds };
+  }
+
+  if (listFilter === "past") {
+    const pastSixMonthCustomerIds = await Scheme.distinct("customer", {
+      status: SCHEME_STATUS.ACTIVE,
+      sixMonthDate: { $lte: new Date() },
+    });
+    constrainCustomerIds(query, pastSixMonthCustomerIds);
+  } else if (listFilter === "none") {
+    const activeCustomerIds = await Scheme.distinct("customer", {
+      status: SCHEME_STATUS.ACTIVE,
+    });
+    constrainCustomerIds(query, activeCustomerIds, { exclude: true });
   }
 
   let customers = [];
@@ -580,7 +658,12 @@ const searchCustomers = async (search = "", actor = null, options = {}) => {
       actorId: actor?._id ? String(actor._id) : null,
       accessMode,
       term: term || null,
+      sixMonthPhase: listFilter === "past" ? "past" : null,
+      schemeFilter: listFilter || null,
+      createdBy: createdBy ? String(createdBy) : null,
     });
+
+    const total = await Customer.countDocuments(query);
 
     if (cursor) {
       if (
@@ -612,6 +695,7 @@ const searchCustomers = async (search = "", actor = null, options = {}) => {
         scope: scopeToken,
       }),
     }).pageInfo;
+    pageInfo.total = total;
   } else if (!term) {
     customers = await Customer.find(query).sort({ createdAt: -1 }).limit(100);
   } else {

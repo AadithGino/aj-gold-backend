@@ -237,7 +237,7 @@ describe("Phase 2 — canonical settlement and financial history APIs", () => {
     await pay(second.customer, second.scheme, staff, 2500);
 
     await withMockedNow(firstPeriodTime(), () =>
-      settle(second.scheme._id, staff, {
+      settle(second.scheme._id, admin, {
         status: SCHEME_STATUS.CLOSED,
         notes: "Early close note",
         payoutMethod: PAYMENT_METHODS.CASH,
@@ -279,7 +279,7 @@ describe("Phase 2 — canonical settlement and financial history APIs", () => {
     });
     assert.equal(closed.status, 200);
     assert.equal(closed.body.data.items[0].status, SCHEME_STATUS.CLOSED);
-    assert.equal(closed.body.data.items[0].amount, 2500);
+    assert.equal(closed.body.data.items[0].amount, 2375);
     assert.equal(closed.body.data.items[0].settlementCategory, "early_closure");
     assert.equal(closed.body.data.items[0].notes, "Early close note");
     assert.equal(closed.body.data.items[0].payoutReference, undefined);
@@ -322,18 +322,27 @@ describe("Phase 2 — canonical settlement and financial history APIs", () => {
     assert.equal(asAdmin.body.data.items[0].customer.name, first.customer.name);
   });
 
-  it("staff own activity contains both terminal settlement types", async () => {
+  it("staff cannot settle; own redemption activity stays empty", async () => {
     const admin = await createAdmin();
     const staff = await createStaff("Closer");
     const first = await seedCustomerScheme(admin, "StaffA");
     const second = await seedCustomerScheme(admin, "StaffB");
     await pay(first.customer, first.scheme, staff, 3000);
     await pay(second.customer, second.scheme, staff, 1800);
+
+    await assert.rejects(
+      () =>
+        withMockedNow(firstPeriodTime(), () =>
+          settle(second.scheme._id, staff, { status: SCHEME_STATUS.CLOSED, payoutMethod: PAYMENT_METHODS.CASH })
+        ),
+      (error) => error.statusCode === 403
+    );
+
     await withMockedNow(firstPeriodTime(), () =>
-      settle(second.scheme._id, staff, { status: SCHEME_STATUS.CLOSED, payoutMethod: PAYMENT_METHODS.CASH })
+      settle(second.scheme._id, admin, { status: SCHEME_STATUS.CLOSED, payoutMethod: PAYMENT_METHODS.CASH })
     );
     await withMockedNow(afterMaturity(), () =>
-      settle(first.scheme._id, staff, { status: SCHEME_STATUS.REDEEMED, payoutMethod: PAYMENT_METHODS.UPI })
+      settle(first.scheme._id, admin, { status: SCHEME_STATUS.REDEEMED, payoutMethod: PAYMENT_METHODS.UPI })
     );
 
     const response = await httpRequest({
@@ -342,10 +351,8 @@ describe("Phase 2 — canonical settlement and financial history APIs", () => {
       token: signAccessToken(staff),
     });
     assert.equal(response.status, 200);
-    const statuses = response.body.data.items.map((row) => row.status).sort();
-    assert.deepEqual(statuses, [SCHEME_STATUS.CLOSED, SCHEME_STATUS.REDEEMED].sort());
-    assert.equal(response.body.data.summary.count, 2);
-    assert.equal(response.body.data.summary.totalAmount, 4800);
+    assert.equal(response.body.data.items.length, 0);
+    assert.equal(response.body.data.summary.count, 0);
   });
 
   const addSettledScheme = async (admin, staff, customer, amount, extras = {}) => {
@@ -366,12 +373,12 @@ describe("Phase 2 — canonical settlement and financial history APIs", () => {
     const first = await seedCustomerScheme(admin, "PageA");
     const second = await seedCustomerScheme(admin, "PageB");
     await pay(first.customer, first.scheme, staff, 1000);
-    await withMockedNow(afterMaturity(), () => settle(first.scheme._id, staff));
-    await addSettledScheme(admin, staff, first.customer, 1100, { actor: staff });
-    await addSettledScheme(admin, staff, first.customer, 1200, { actor: staff });
-    await addSettledScheme(admin, staff, first.customer, 1300, { actor: staff });
+    await withMockedNow(afterMaturity(), () => settle(first.scheme._id, admin));
+    await addSettledScheme(admin, staff, first.customer, 1100, { actor: admin });
+    await addSettledScheme(admin, staff, first.customer, 1200, { actor: admin });
+    await addSettledScheme(admin, staff, first.customer, 1300, { actor: admin });
     await pay(second.customer, second.scheme, staff, 1400);
-    await withMockedNow(afterMaturity(), () => settle(second.scheme._id, staff));
+    await withMockedNow(afterMaturity(), () => settle(second.scheme._id, admin));
     const otherStaff = await createStaff("OtherCloser");
 
     const adminToken = signAccessToken(admin);
@@ -426,15 +433,14 @@ describe("Phase 2 — canonical settlement and financial history APIs", () => {
       token: staffToken,
     });
     assert.equal(staffList.status, 200);
-    assert.equal(staffList.body.data.items.length, 2);
-    assert.equal(staffList.body.pageInfo.hasMore, true);
+    assert.equal(staffList.body.data.items.length, 0);
+    assert.equal(staffList.body.pageInfo.hasMore, false);
 
     const staffWalk = await walkPages({
       path: "/api/dashboard/staff/redemptions",
       token: staffToken,
     });
-    assert.equal(staffWalk.items.length, 5);
-    assert.equal(new Set(staffWalk.items.map((row) => String(row._id))).size, 5);
+    assert.equal(staffWalk.items.length, 0);
 
     const adminAll = await httpRequest({
       method: "GET",
@@ -442,25 +448,13 @@ describe("Phase 2 — canonical settlement and financial history APIs", () => {
       token: adminToken,
     });
     assert.equal(adminAll.status, 200);
-    assert.equal(adminAll.body.data.items.length, 2);
-    assert.equal(adminAll.body.pageInfo.hasMore, true);
-
-    const secondPage = await httpRequest({
-      method: "GET",
-      path: `/api/admin/staff/${staff._id}/redeemed-closed-history?limit=2&cursor=${encodeURIComponent(
-        adminAll.body.pageInfo.nextCursor
-      )}`,
-      token: adminToken,
-    });
-    assert.equal(secondPage.status, 200);
-    const ids = [...adminAll.body.data.items, ...secondPage.body.data.items].map((row) => String(row._id));
-    assert.equal(new Set(ids).size, ids.length);
-    assert.ok(ids.length >= 4);
+    assert.equal(adminAll.body.data.items.length, 0);
+    assert.equal(adminAll.body.pageInfo.hasMore, false);
 
     const crossStaff = await httpRequest({
       method: "GET",
       path: `/api/admin/staff/${otherStaff._id}/redeemed-closed-history?limit=2&cursor=${encodeURIComponent(
-        adminAll.body.pageInfo.nextCursor
+        firstPage.body.pageInfo.nextCursor
       )}`,
       token: adminToken,
     });
@@ -510,17 +504,16 @@ describe("Phase 2 — canonical settlement and financial history APIs", () => {
     for (let i = 0; i < 4; i += 1) {
       const seeded = await seedCustomerScheme(admin, `Eq${i}`);
       await pay(seeded.customer, seeded.scheme, staff, 1100);
-      await withMockedNow(when, () => settle(seeded.scheme._id, staff));
+      await withMockedNow(when, () => settle(seeded.scheme._id, admin));
       rows.push(seeded);
     }
 
-    const token = signAccessToken(staff);
+    const token = signAccessToken(rows[0].customerUser);
     const { items } = await walkPages({
-      path: "/api/dashboard/staff/redemptions",
+      path: "/api/dashboard/customer/redemptions",
       token,
     });
-    assert.equal(items.length, 4);
-    assert.equal(new Set(items.map((row) => String(row._id))).size, 4);
+    assert.equal(items.length, 1);
   });
 
   it("more than 100 customer receipts and later correction pages remain retrievable", async () => {
@@ -585,7 +578,7 @@ describe("Phase 2 — canonical settlement and financial history APIs", () => {
     const staff = await createStaff();
     const seeded = await seedCustomerScheme(admin, "Idx");
     await pay(seeded.customer, seeded.scheme, staff, 2000);
-    await withMockedNow(afterMaturity(), () => settle(seeded.scheme._id, staff));
+    await withMockedNow(afterMaturity(), () => settle(seeded.scheme._id, admin));
 
     const schemes = mongoose.connection.db.collection("schemes");
     const customerPlan = await schemes
@@ -597,7 +590,7 @@ describe("Phase 2 — canonical settlement and financial history APIs", () => {
       .explain("queryPlanner");
     const staffPlan = await schemes
       .find({
-        "settlement.settledBy": staff._id,
+        "settlement.settledBy": admin._id,
         status: { $in: [SCHEME_STATUS.REDEEMED, SCHEME_STATUS.CLOSED] },
       })
       .sort({ "settlement.settledAt": -1, _id: -1 })
@@ -617,7 +610,7 @@ describe("Phase 2 — canonical settlement and financial history APIs", () => {
       .explain("queryPlanner");
     const hintedStaff = await schemes
       .find({
-        "settlement.settledBy": staff._id,
+        "settlement.settledBy": admin._id,
         status: { $in: [SCHEME_STATUS.REDEEMED, SCHEME_STATUS.CLOSED] },
       })
       .sort({ "settlement.settledAt": -1, _id: -1 })

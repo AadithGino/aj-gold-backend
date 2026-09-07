@@ -75,6 +75,7 @@ const getCashPositionSummary = async () => {
   const totalCashWithStaff = accounts.totalStaffCustody;
   const cashInVault = accounts.vault;
   const totalCustomerSettlement = flows.settlementPaid;
+  const earlyClosureRetained = flows.earlyClosureRetained || 0;
   const settlementAuthorizedNotPaid = accounts.settlementPayable;
   const authorizedNotPaidSchemes = settlementAuthorizedNotPaid > 0 ? 1 : 0;
 
@@ -105,6 +106,7 @@ const getCashPositionSummary = async () => {
     totalCashSubmittedToVault: flows.staffCashSubmitted,
     totalAdminCashCollected,
     totalCustomerSettlement,
+    earlyClosureRetained,
     settlementAuthorizedNotPaid,
     settlementTrackingImplemented: true,
     journalBacked: true,
@@ -115,6 +117,7 @@ const getCashPositionSummary = async () => {
       totalCustomerSettlement,
       settlementAuthorizedNotPaid,
       liquidPosition,
+      earlyClosureRetained,
     },
     collectionBreakdown: {
       netCustomerCollected: flows.netCustomerCollected,
@@ -125,12 +128,14 @@ const getCashPositionSummary = async () => {
       totalCustomerSettlement,
       settlementAuthorized: settlementAuthorizedNotPaid,
       authorizedNotPaidSchemes,
+      earlyClosureRetained,
     },
     accounts: {
       customerSchemeLiability: accounts.customerSchemeLiability,
       vault: accounts.vault,
       settlementPayable: accounts.settlementPayable,
       staffCashCustody: accounts.totalStaffCustody,
+      earlyClosureRetained: accounts.earlyClosureRetained || earlyClosureRetained,
     },
     staffCashRows: staffCustodyRows
       .filter(

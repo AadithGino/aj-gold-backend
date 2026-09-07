@@ -187,7 +187,7 @@ describe("Corrective Phase 1 — owner-approved settlement contract", () => {
     assert.equal(settled.status, SCHEME_STATUS.REDEEMED);
   });
 
-  it("early closure uses the same principal-only formula", async () => {
+  it("early closure retains 5% of principal (floor rupees)", async () => {
     const admin = await createAdmin();
     const recentStart = new Date();
     const { customer, scheme } = await seedCustomerScheme(admin, { startDate: recentStart });
@@ -205,7 +205,8 @@ describe("Corrective Phase 1 — owner-approved settlement contract", () => {
       settlePayload({ status: SCHEME_STATUS.CLOSED }),
       admin
     );
-    assert.equal(settled.settlement.amount, 4200);
+    assert.equal(settled.settlement.amount, 3990);
+    assert.equal(settled.settlement.earlyClosureRetained, 210);
     assert.equal(settled.settlement.settlementCategory, "early_closure");
   });
 
@@ -329,17 +330,19 @@ describe("Corrective Phase 1 — owner-approved settlement contract", () => {
     assert.equal(settled.settlementWorkflow.paidBy, undefined);
   });
 
-  it("staff with settlement permission succeeds; staff without permission fails", async () => {
+  it("staff cannot settle even with legacy settlement permission flags", async () => {
     const admin = await createAdmin();
     const allowed = await createStaff(SETTLEMENT_STAFF_PERMISSIONS);
     const denied = await createStaff(FULL_OPERATIONAL_STAFF_PERMISSIONS);
     const { customer, scheme } = await seedCustomerScheme(admin);
     await pay(customer, scheme, allowed, 2400);
 
-    const settled = await withMockedNow(maturityTime(), () =>
-      updateSchemeStatus(scheme._id, settlePayload(), allowed)
+    await assert.rejects(
+      withMockedNow(maturityTime(), () =>
+        updateSchemeStatus(scheme._id, settlePayload(), allowed)
+      ),
+      (error) => error.statusCode === 403
     );
-    assert.equal(settled.settlement.amount, 2400);
 
     const { customer: customer2, scheme: scheme2 } = await seedCustomerScheme(admin);
     await pay(customer2, scheme2, allowed, 1200);
@@ -349,6 +352,11 @@ describe("Corrective Phase 1 — owner-approved settlement contract", () => {
       ),
       (error) => error.statusCode === 403
     );
+
+    const settled = await withMockedNow(maturityTime(), () =>
+      updateSchemeStatus(scheme._id, settlePayload(), admin)
+    );
+    assert.equal(settled.settlement.amount, 2400);
   });
 
   it("caller-supplied settlementAmount cannot change the payout", async () => {

@@ -12,6 +12,7 @@ const {
 } = require("../services/staff.service");
 const ApiError = require("../utils/ApiError");
 const asyncHandler = require("../utils/asyncHandler");
+const { resolveStaffPermissions } = require("../constants/staffPermissions");
 
 const permissionsSchema = z.object({
   canCreateCustomer: z.boolean().optional(),
@@ -49,6 +50,7 @@ const updateStaffSchema = z.object({
     .optional(),
   email: z.string().trim().email().optional().or(z.literal("")),
   status: z.enum([USER_STATUS.ACTIVE, USER_STATUS.INACTIVE]).optional(),
+  password: z.string().min(8, "Password must be at least 8 characters.").optional(),
   permissions: permissionsSchema.optional(),
   notes: z.string().trim().optional(),
 });
@@ -76,7 +78,7 @@ const createStaffHandler = asyncHandler(async (req, res) => {
       staffProfileId: profile._id,
       ...sanitizeStaffUser(user),
       employeeCode: profile.employeeCode,
-      permissions: profile.permissions,
+      permissions: resolveStaffPermissions(profile.permissions),
       notes: profile.notes || "",
     },
   });
@@ -120,7 +122,7 @@ const updateStaffHandler = asyncHandler(async (req, res) => {
       staffProfileId: profile._id,
       ...sanitizeStaffUser(user),
       employeeCode: profile.employeeCode,
-      permissions: profile.permissions,
+      permissions: resolveStaffPermissions(profile.permissions),
       notes: profile.notes || "",
     },
   });

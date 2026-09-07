@@ -19,6 +19,7 @@ const buildReconciliationSummary = async () => {
     collectionReversed,
     staffCashSubmitted,
     vaultAdjustments,
+    earlyClosureRetained,
   ] = await Promise.all([
     getJournalAccountBalance(JOURNAL_ACCOUNTS.CUSTOMER_SCHEME_LIABILITY),
     getJournalAccountBalance(JOURNAL_ACCOUNTS.VAULT),
@@ -27,6 +28,7 @@ const buildReconciliationSummary = async () => {
     getEventTypeTotal(JOURNAL_EVENT_TYPES.COLLECTION_REVERSAL),
     getEventTypeTotal(JOURNAL_EVENT_TYPES.STAFF_CASH_SUBMITTED),
     getEventTypeTotal(JOURNAL_EVENT_TYPES.VAULT_ADJUSTMENT),
+    getEventTypeTotal(JOURNAL_EVENT_TYPES.SETTLEMENT_EARLY_CLOSURE_RETAINED),
   ]);
 
   const netCustomerCollected = collectionReceived - collectionReversed;
@@ -147,6 +149,7 @@ const buildReconciliationSummary = async () => {
       vault: vaultBalance,
       settlementPayable,
       totalStaffCustody: totalStaffCustodyJournal,
+      earlyClosureRetained,
     },
     flows: {
       collectionReceived,
@@ -155,6 +158,7 @@ const buildReconciliationSummary = async () => {
       staffCashSubmitted,
       vaultAdjustments,
       settlementPaid,
+      earlyClosureRetained,
     },
     liquidPosition,
     equation: {

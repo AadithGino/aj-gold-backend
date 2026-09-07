@@ -22,6 +22,7 @@ const {
   saveIdempotencyResult,
 } = require("./idempotency.service");
 const { buildSchemeCreateIntent } = require("../utils/idempotencyPayload");
+const { DEFAULT_SCHEME_NAME } = require("../constants/scheme");
 const { completeSettlement } = require("./settlement.service");
 const { enqueueOutboxEvent } = require("./outbox.service");
 const { OUTBOX_TOPICS } = require("../models/outboxEvent.model");
@@ -53,8 +54,8 @@ const createScheme = async ({ customerId, schemeName, startDate, clientRequestId
       return { replay: true, response: replay.response };
     }
 
-    const customer = await getCustomerOrThrow(customerId);
-    await assertCustomerActiveForOperations(customer);
+    const customer = await getCustomerOrThrow(customerId, session);
+    await assertCustomerActiveForOperations(customer, session);
     const activeScheme = await Scheme.findOne({
       customer: customer._id,
       status: SCHEME_STATUS.ACTIVE,
@@ -72,7 +73,7 @@ const createScheme = async ({ customerId, schemeName, startDate, clientRequestId
     }
 
     const dates = calculateSchemeDates(startDate || new Date());
-    const enrollmentNumber = await createEnrollmentNumber(dates.startDate);
+    const enrollmentNumber = await createEnrollmentNumber(dates.startDate, session);
 
     let scheme;
     try {
@@ -81,7 +82,7 @@ const createScheme = async ({ customerId, schemeName, startDate, clientRequestId
           {
             customer: customer._id,
             enrollmentNumber,
-            schemeName: schemeName?.trim() || "Gold Savings Scheme",
+            schemeName: schemeName?.trim() || DEFAULT_SCHEME_NAME,
             startDate: dates.startDate,
             sixMonthDate: dates.sixMonthDate,
             maturityDate: dates.maturityDate,

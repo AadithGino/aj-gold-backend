@@ -1,8 +1,9 @@
 const bcrypt = require("bcryptjs");
 const mongoose = require("mongoose");
-const { DEFAULT_STAFF_PERMISSIONS } = require("../constants/staffPermissions");
+const { sanitizeWritableStaffPermissions, resolveStaffPermissions } = require("../constants/staffPermissions");
 const User = require("../models/user.model");
 const StaffProfile = require("../models/staffProfile.model");
+const Customer = require("../models/customer.model");
 const {
   USER_ROLES,
   USER_STATUS,
@@ -45,9 +46,9 @@ const sanitizeStaffUser = (user) => ({
   createdAt: user.createdAt,
 });
 
-const generateEmployeeCode = async (date = new Date()) => {
+const generateEmployeeCode = async (date = new Date(), session = null) => {
   const year = date.getFullYear();
-  const seq = await getNextSequence(`employee-${year}`);
+  const seq = await getNextSequence(`employee-${year}`, session);
   return `AJGK-STF-${year}-${String(seq).padStart(4, "0")}`;
 };
 
@@ -71,15 +72,18 @@ const createStaff = async (
   { name, phone, email, password, employeeCode, permissions, notes },
   actor
 ) => {
-  const existingUser = await User.findOne({ phone });
+  const trimmedPhone = phone.trim();
+  const existingUser = await User.findOne({ phone: trimmedPhone });
   if (existingUser) {
     throw new ApiError(409, "Phone number is already registered.");
   }
 
-  const resolvedEmployeeCode = employeeCode?.trim() || (await generateEmployeeCode());
-  const existingCode = await StaffProfile.findOne({ employeeCode: resolvedEmployeeCode });
-  if (existingCode) {
-    throw new ApiError(409, "Employee code already exists.");
+  const customEmployeeCode = employeeCode?.trim() || "";
+  if (customEmployeeCode) {
+    const existingCode = await StaffProfile.findOne({ employeeCode: customEmployeeCode });
+    if (existingCode) {
+      throw new ApiError(409, "Employee code already exists.");
+    }
   }
 
   const resolvedPassword = password?.trim() || generateTemporaryPassword();
@@ -90,11 +94,25 @@ const createStaff = async (
   try {
     session.startTransaction();
 
+    const phoneTaken = await User.findOne({ phone: trimmedPhone }).session(session);
+    if (phoneTaken) {
+      throw new ApiError(409, "Phone number is already registered.");
+    }
+
+    const resolvedEmployeeCode =
+      customEmployeeCode || (await generateEmployeeCode(new Date(), session));
+    const existingCode = await StaffProfile.findOne({
+      employeeCode: resolvedEmployeeCode,
+    }).session(session);
+    if (existingCode) {
+      throw new ApiError(409, "Employee code already exists.");
+    }
+
     const [user] = await User.create(
       [
         {
           name: name.trim(),
-          phone: phone.trim(),
+          phone: trimmedPhone,
           email: email?.trim() || undefined,
           passwordHash,
           role: USER_ROLES.STAFF,
@@ -111,10 +129,7 @@ const createStaff = async (
         {
           user: user._id,
           employeeCode: resolvedEmployeeCode,
-          permissions: {
-            ...DEFAULT_STAFF_PERMISSIONS,
-            ...(permissions || {}),
-          },
+          permissions: sanitizeWritableStaffPermissions(permissions),
           joinedAt: new Date(),
           notes: notes?.trim() || "",
         },
@@ -179,10 +194,10 @@ const updateStaff = async (staffUserId, updates, actor) => {
   }
 
   if (updates.permissions) {
-    profile.permissions = {
+    profile.permissions = sanitizeWritableStaffPermissions({
       ...(profile.permissions?.toObject ? profile.permissions.toObject() : profile.permissions),
       ...updates.permissions,
-    };
+    });
   }
 
   if (updates.permissions) {
@@ -200,6 +215,20 @@ const updateStaff = async (staffUserId, updates, actor) => {
 
   if (updates.notes !== undefined) {
     profile.notes = updates.notes?.trim() || "";
+  }
+
+  if (updates.password?.trim()) {
+    assertPrivilegedPassword(updates.password);
+    user.passwordHash = await bcrypt.hash(String(updates.password).trim(), 10);
+    user.tokenVersion = (user.tokenVersion || 0) + 1;
+    await logAudit({
+      actor: actor._id,
+      actorRole: actor.role,
+      action: AUDIT_ACTIONS.PASSWORD_RESET,
+      targetType: "User",
+      targetId: user._id,
+      notes: "Staff password set by admin",
+    });
   }
 
   user.updatedBy = actor._id;
@@ -248,7 +277,16 @@ const updateStaffStatus = async (staffUserId, status, actor) => {
   return { user, profile };
 };
 
-const buildStaffListItem = async (user, profile) => {
+const countCustomersCreatedByStaffIds = async (staffIds = []) => {
+  if (!staffIds.length) return new Map();
+  const rows = await Customer.aggregate([
+    { $match: { createdBy: { $in: staffIds } } },
+    { $group: { _id: "$createdBy", count: { $sum: 1 } } },
+  ]);
+  return new Map(rows.map((row) => [String(row._id), row.count || 0]));
+};
+
+const buildStaffListItem = async (user, profile, customersAdded = 0) => {
   const now = new Date();
   const [todayCollection, cashSummary] = await Promise.all([
     getStaffCollectionTotal(user._id, startOfDay(now), endOfDay(now)),
@@ -265,6 +303,7 @@ const buildStaffListItem = async (user, profile) => {
     status: user.status,
     todayCollection,
     cashInHand: cashSummary.cashInHand,
+    customersAdded,
     createdAt: user.createdAt,
   };
 };
@@ -307,11 +346,19 @@ const listStaff = async ({ search = "", cursor, limit } = {}) => {
     .limit(resolvedLimit + 1);
   const profiles = await StaffProfile.find({ user: { $in: users.map((user) => user._id) } });
   const profileMap = new Map(profiles.map((profile) => [profile.user.toString(), profile]));
+  const listedUsers = users.filter((user) => profileMap.has(user._id.toString()));
+  const customersAddedByStaff = await countCustomersCreatedByStaffIds(
+    listedUsers.map((user) => user._id)
+  );
 
   const items = await Promise.all(
-    users
-      .filter((user) => profileMap.has(user._id.toString()))
-      .map((user) => buildStaffListItem(user, profileMap.get(user._id.toString())))
+    listedUsers.map((user) =>
+      buildStaffListItem(
+        user,
+        profileMap.get(user._id.toString()),
+        customersAddedByStaff.get(user._id.toString()) || 0
+      )
+    )
   );
 
   return buildCursorPage(items, {
@@ -358,6 +405,8 @@ const getStaffDetail = async (
     paymentHistory,
     cashSubmissionHistory,
     statusActions,
+    customersAdded,
+    customersAddedItems,
   ] = await Promise.all([
     getStaffCashInHand(staffUserId),
     getStaffSummaryBuckets(staffUserId),
@@ -374,6 +423,11 @@ const getStaffDetail = async (
     }),
     getStaffCashSubmissionHistory(staffUserId, { from: rangeFrom, to: rangeTo }),
     getStaffRedeemedClosedHistory(staffUserId),
+    Customer.countDocuments({ createdBy: staffUserId }),
+    Customer.find({ createdBy: staffUserId })
+      .sort({ createdAt: -1 })
+      .select("name phone passbookNumber status createdAt")
+      .lean(),
   ]);
 
   return {
@@ -385,11 +439,20 @@ const getStaffDetail = async (
       phone: user.phone,
       employeeCode: profile.employeeCode,
       status: user.status,
-      permissions: profile.permissions,
+      permissions: resolveStaffPermissions(profile.permissions),
       notes: profile.notes || "",
       joinedAt: profile.joinedAt,
       createdAt: user.createdAt,
     },
+    customersAdded,
+    customersAddedItems: (customersAddedItems || []).map((customer) => ({
+      _id: customer._id,
+      name: customer.name,
+      phone: customer.phone,
+      passbookNumber: customer.passbookNumber || "",
+      status: customer.status,
+      createdAt: customer.createdAt,
+    })),
     cashInHand: cashSummary.cashInHand,
     cashCollected: cashSummary.cashCollected,
     cashSubmitted: cashSummary.cashSubmitted,

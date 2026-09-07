@@ -334,7 +334,14 @@ const getStaffPerformanceReport = async (filters = {}) => {
     if (range.to) submissionMatchInRange.submissionDate.$lte = range.to;
   }
 
-  const [profiles, effectiveContext, submissionRows, submissionRowsInRange] = await Promise.all([
+  const createdMatch = { createdBy: { $in: staffIds } };
+  if (range.from || range.to) {
+    createdMatch.createdAt = {};
+    if (range.from) createdMatch.createdAt.$gte = range.from;
+    if (range.to) createdMatch.createdAt.$lte = range.to;
+  }
+
+  const [profiles, effectiveContext, submissionRows, submissionRowsInRange, createdRows] = await Promise.all([
     StaffProfile.find({ user: { $in: staffIds } }).lean(),
     loadEffectivePaymentContext(query),
     CashSubmission.aggregate([
@@ -355,6 +362,10 @@ const getStaffPerformanceReport = async (filters = {}) => {
         },
       },
     ]),
+    Customer.aggregate([
+      { $match: createdMatch },
+      { $group: { _id: "$createdBy", count: { $sum: 1 } } },
+    ]),
   ]);
 
   const profileMap = new Map(profiles.map((profile) => [String(profile.user), profile]));
@@ -363,6 +374,9 @@ const getStaffPerformanceReport = async (filters = {}) => {
   );
   const submittedInRangeByStaff = new Map(
     submissionRowsInRange.map((row) => [String(row._id), row.total || 0])
+  );
+  const customersAddedByStaff = new Map(
+    createdRows.map((row) => [String(row._id), row.count || 0])
   );
   const custodyByStaff = await getStaffCustodyBalanceMap(
     staffUsers.map((staff) => staff._id)
@@ -457,6 +471,7 @@ const getStaffPerformanceReport = async (filters = {}) => {
         submittedCashInRange,
         submittedCashAllTime: submittedCash,
         pendingCash: cashInHand,
+        customersAdded: customersAddedByStaff.get(staffId) || 0,
         recentPayments: recentPaymentsRaw,
       };
     });

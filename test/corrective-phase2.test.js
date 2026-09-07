@@ -337,41 +337,11 @@ describe("Corrective Phase 3 — canonical effective payments and corrections", 
     );
   });
 
-  it("CASH to UPI without collection reference is rejected; with reference succeeds", async () => {
+  it("CASH to UPI without collection reference succeeds because references are optional", async () => {
     const admin = await createAdmin();
     const staff = await createStaff();
     const { customer, scheme } = await seedCustomerScheme(admin);
     const paymentResult = await pay(customer, scheme, staff, 6000, PAYMENT_METHODS.CASH);
-
-    const badCorrection = await createCorrectionRequest(
-      paymentResult.payment._id,
-      { correctionType: CORRECTION_TYPES.EDIT_METHOD, requestedValue: PAYMENT_METHODS.UPI, reason: "Switch method" },
-      staff
-    );
-    await assert.rejects(
-      approveCorrection(
-        badCorrection._id,
-        { reviewClientRequestId: reqId(), reviewNotes: "approve" },
-        admin
-      ),
-      (error) => error.statusCode === 400
-    );
-    await rejectCorrection(
-      badCorrection._id,
-      { reviewClientRequestId: reqId(), reviewNotes: "reject invalid method change" },
-      admin
-    );
-
-    const refCorrection = await createCorrectionRequest(
-      paymentResult.payment._id,
-      { correctionType: CORRECTION_TYPES.EDIT_REFERENCE, requestedValue: "UPI-REF-001", reason: "Add ref" },
-      staff
-    );
-    await approveCorrection(
-      refCorrection._id,
-      { reviewClientRequestId: reqId(), reviewNotes: "ok" },
-      admin
-    );
 
     const methodCorrection = await createCorrectionRequest(
       paymentResult.payment._id,
@@ -386,7 +356,6 @@ describe("Corrective Phase 3 — canonical effective payments and corrections", 
 
     const effective = await getEffectiveSnapshotForPayment(paymentResult.payment._id);
     assert.equal(effective.paymentMethod, PAYMENT_METHODS.UPI);
-    assert.equal(effective.transactionReference, "UPI-REF-001");
   });
 
   it("approved correction changes entitlement exactly once", async () => {

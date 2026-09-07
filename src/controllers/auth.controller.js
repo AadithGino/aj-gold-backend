@@ -1,4 +1,4 @@
-const { login, register, me, logout } = require("../services/auth.service");
+const { login, register, me, logout, changePassword } = require("../services/auth.service");
 const asyncHandler = require("../utils/asyncHandler");
 
 const loginController = asyncHandler(async (req, res) => {
@@ -21,9 +21,15 @@ const logoutController = asyncHandler(async (req, res) => {
   res.json({ success: true, data });
 });
 
+const changePasswordController = asyncHandler(async (req, res) => {
+  const data = await changePassword(req.body || {}, req.user);
+  res.json({ success: true, data });
+});
+
 module.exports = {
   loginController,
   registerController,
   meController,
   logoutController,
+  changePasswordController,
 };
