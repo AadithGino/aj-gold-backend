@@ -90,7 +90,6 @@ const login = async ({ phone, password }, { ip } = {}) => {
 };
 
 const logout = async (user) => {
-  await User.updateOne({ _id: user._id }, { $inc: { tokenVersion: 1 } });
   await logAudit({
     actor: user._id,
     actorRole: user.role,

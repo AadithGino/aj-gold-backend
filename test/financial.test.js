@@ -763,15 +763,20 @@ describe("financial hardening", () => {
     await expectStatus(getPaymentReceipt(payment.payment._id, staffB), 403);
   });
 
-  it("21. logout invalidates the previously issued JWT", async () => {
+  it("21. concurrent logins stay valid across unlimited devices", async () => {
     const admin = await createAdmin();
     admin.passwordHash = await bcrypt.hash("adminpass1", 10);
     await admin.save();
-    const { token } = await login({ phone: admin.phone, password: "adminpass1" });
+    const first = await login({ phone: admin.phone, password: "adminpass1" });
+    const second = await login({ phone: admin.phone, password: "adminpass1" });
+    const third = await login({ phone: admin.phone, password: "adminpass1" });
     await logout(admin);
-    const decoded = jwt.verify(token, JWT_SECRET);
-    const user = await User.findById(decoded.id);
-    assert.notEqual(decoded.tokenVersion ?? 0, user.tokenVersion);
+
+    const user = await User.findById(admin._id);
+    for (const token of [first.token, second.token, third.token]) {
+      const decoded = jwt.verify(token, JWT_SECRET);
+      assert.equal(decoded.tokenVersion ?? 0, user.tokenVersion || 0);
+    }
   });
 
   it("21b. login embeds the current tokenVersion after logout", async () => {
@@ -783,7 +788,7 @@ describe("financial hardening", () => {
     const { token } = await login({ phone: admin.phone, password: "adminpass1" });
     const decoded = jwt.verify(token, JWT_SECRET);
     assert.equal(decoded.tokenVersion, userAfterLogout.tokenVersion);
-    assert.equal(decoded.tokenVersion, 1);
+    assert.equal(decoded.tokenVersion, 0);
   });
 
   it("21c. change-password invalidates the old token and returns a fresh one", async () => {

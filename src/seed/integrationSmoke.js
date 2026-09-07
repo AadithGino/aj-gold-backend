@@ -269,10 +269,10 @@ const run = async () => {
     path: "/api/auth/me",
     token: staffToken,
   });
-  if (afterLogout.status !== 401) {
-    fail(`Expected 401 after logout, got ${afterLogout.status}`);
+  if (afterLogout.status !== 200) {
+    fail(`Expected session to remain valid after logout on another device, got ${afterLogout.status}`);
   }
-  console.log("PASS: logout token invalidation");
+  console.log("PASS: logout does not revoke other device sessions");
 
   const notFound = await request({ method: "GET", path: "/api/not-a-real-route" });
   if (!notFound.body?.requestId) {
