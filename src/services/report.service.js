@@ -303,12 +303,76 @@ const getCollectionReport = async (filters = {}, actor) => {
   };
 };
 
+const mapPerformanceCollector = ({
+  user,
+  employeeCode = "",
+  methodMap,
+  recentEntries = [],
+  customersAdded = 0,
+  cashInHand = 0,
+  submittedCash = 0,
+  submittedCashInRange = 0,
+}) => {
+  const breakdown = Array.from((methodMap || new Map()).entries()).map(([paymentMethod, value]) => ({
+    paymentMethod,
+    total: value.total,
+    count: value.count,
+  }));
+  const recentPayments = [...recentEntries]
+    .sort(
+      (left, right) =>
+        new Date(right.ledger.paymentDate).getTime() -
+        new Date(left.ledger.paymentDate).getTime()
+    )
+    .slice(0, 5)
+    .map(({ payment, ledger }) =>
+      mapCollectionPayment(payment, {
+        displayAmount: ledger.amount,
+        displayPaymentMethod: ledger.paymentMethod,
+        displayPaymentDate: ledger.paymentDate,
+        effectiveAmount: ledger.amount,
+        effectivePaymentMethod: ledger.paymentMethod,
+        isEffectivelyReversed: false,
+      })
+    );
+  const cashCollected = sumMethod(breakdown, PAYMENT_METHODS.CASH);
+  const onlineCollected =
+    sumMethod(breakdown, PAYMENT_METHODS.UPI) +
+    sumMethod(breakdown, PAYMENT_METHODS.BANK) +
+    sumMethod(breakdown, PAYMENT_METHODS.CARD);
+  const totalCollected = breakdown.reduce((sum, row) => sum + row.total, 0);
+  const paymentCount = breakdown.reduce((sum, row) => sum + row.count, 0);
+
+  return {
+    staffUserId: user._id,
+    name: user.name,
+    phone: user.phone,
+    employeeCode,
+    role: user.role,
+    totalCollected,
+    cashCollected,
+    onlineCollected,
+    paymentCount,
+    cashInHand,
+    cashCollectedAllTime: cashCollected,
+    submittedCash,
+    submittedCashInRange,
+    submittedCashAllTime: submittedCash,
+    pendingCash: cashInHand,
+    customersAdded,
+    recentPayments,
+  };
+};
+
 const getStaffPerformanceReport = async (filters = {}) => {
   const { query, range } = buildBasePaymentQuery(filters);
 
   const staffQuery = { role: USER_ROLES.STAFF, status: "ACTIVE" };
+  const adminQuery = { role: USER_ROLES.ADMIN, status: "ACTIVE" };
   if (filters.staffId) {
-    staffQuery._id = toObjectId(filters.staffId, "staff id");
+    const targetId = toObjectId(filters.staffId, "staff id");
+    staffQuery._id = targetId;
+    adminQuery._id = targetId;
   }
 
   const effectiveFilters = {};
@@ -321,8 +385,12 @@ const getStaffPerformanceReport = async (filters = {}) => {
     delete query.paymentMethod;
   }
 
-  const staffUsers = await User.find(staffQuery).sort({ name: 1 }).lean();
+  const [staffUsers, adminUsers] = await Promise.all([
+    User.find(staffQuery).sort({ name: 1 }).lean(),
+    User.find(adminQuery).sort({ name: 1 }).lean(),
+  ]);
   const staffIds = staffUsers.map((staff) => staff._id);
+  const collectorIds = [...staffIds, ...adminUsers.map((admin) => admin._id)];
   const submissionMatchBase = {
     staff: { $in: staffIds },
     status: CASH_SUBMISSION_STATUS.ACTIVE,
@@ -334,7 +402,7 @@ const getStaffPerformanceReport = async (filters = {}) => {
     if (range.to) submissionMatchInRange.submissionDate.$lte = range.to;
   }
 
-  const createdMatch = { createdBy: { $in: staffIds } };
+  const createdMatch = { createdBy: { $in: collectorIds } };
   if (range.from || range.to) {
     createdMatch.createdAt = {};
     if (range.from) createdMatch.createdAt.$gte = range.from;
@@ -375,14 +443,12 @@ const getStaffPerformanceReport = async (filters = {}) => {
   const submittedInRangeByStaff = new Map(
     submissionRowsInRange.map((row) => [String(row._id), row.total || 0])
   );
-  const customersAddedByStaff = new Map(
+  const customersAddedByCollector = new Map(
     createdRows.map((row) => [String(row._id), row.count || 0])
   );
-  const custodyByStaff = await getStaffCustodyBalanceMap(
-    staffUsers.map((staff) => staff._id)
-  );
-  const methodTotalsByStaff = new Map();
-  const recentByStaff = new Map();
+  const custodyByStaff = await getStaffCustodyBalanceMap(staffIds);
+  const methodTotalsByCollector = new Map();
+  const recentByCollector = new Map();
 
   for (const { payment, ledger } of effectiveContext.entries) {
     if (effectiveFilters.paymentMethod && ledger.paymentMethod !== effectiveFilters.paymentMethod) {
@@ -404,82 +470,49 @@ const getStaffPerformanceReport = async (filters = {}) => {
       }
     }
 
-    const staffId = String(payment.collectedBy);
-    const methodMap = methodTotalsByStaff.get(staffId) || new Map();
+    const collectorId = String(payment.collectedBy);
+    const methodMap = methodTotalsByCollector.get(collectorId) || new Map();
     const methodRow = methodMap.get(ledger.paymentMethod) || { total: 0, count: 0 };
     methodRow.total += ledger.amount;
     methodRow.count += 1;
     methodMap.set(ledger.paymentMethod, methodRow);
-    methodTotalsByStaff.set(staffId, methodMap);
+    methodTotalsByCollector.set(collectorId, methodMap);
 
-    const recentBucket = recentByStaff.get(staffId) || [];
+    const recentBucket = recentByCollector.get(collectorId) || [];
     recentBucket.push({ payment, ledger });
-    recentByStaff.set(staffId, recentBucket);
+    recentByCollector.set(collectorId, recentBucket);
   }
 
   const staffList = staffUsers.map((staff) => {
-      const staffId = String(staff._id);
-      const methodMap = methodTotalsByStaff.get(staffId) || new Map();
-      const breakdown = Array.from(methodMap.entries()).map(([paymentMethod, value]) => ({
-        paymentMethod,
-        total: value.total,
-        count: value.count,
-      }));
-
-      const recentPaymentsRaw = (recentByStaff.get(staffId) || [])
-        .sort(
-          (left, right) =>
-            new Date(right.ledger.paymentDate).getTime() -
-            new Date(left.ledger.paymentDate).getTime()
-        )
-        .slice(0, 5)
-        .map(({ payment, ledger }) =>
-          mapCollectionPayment(payment, {
-            displayAmount: ledger.amount,
-            displayPaymentMethod: ledger.paymentMethod,
-            displayPaymentDate: ledger.paymentDate,
-            effectiveAmount: ledger.amount,
-            effectivePaymentMethod: ledger.paymentMethod,
-            isEffectivelyReversed: false,
-          })
-        );
-
-      const cashCollected = sumMethod(breakdown, PAYMENT_METHODS.CASH);
-      const onlineCollected =
-        sumMethod(breakdown, PAYMENT_METHODS.UPI) +
-        sumMethod(breakdown, PAYMENT_METHODS.BANK) +
-        sumMethod(breakdown, PAYMENT_METHODS.CARD);
-      const totalCollected = breakdown.reduce((sum, row) => sum + row.total, 0);
-      const paymentCount = breakdown.reduce((sum, row) => sum + row.count, 0);
-      const submittedCash = submittedByStaff.get(staffId) || 0;
-      const submittedCashInRange = submittedInRangeByStaff.get(staffId) || 0;
-      const cashInHand = custodyByStaff.get(staffId) ?? 0;
-      const profile = profileMap.get(staffId);
-
-      return {
-        staffUserId: staff._id,
-        name: staff.name,
-        phone: staff.phone,
-        employeeCode: profile?.employeeCode || "",
-        totalCollected,
-        cashCollected,
-        onlineCollected,
-        paymentCount,
-        cashInHand,
-        cashCollectedAllTime: cashCollected,
-        submittedCash,
-        submittedCashInRange,
-        submittedCashAllTime: submittedCash,
-        pendingCash: cashInHand,
-        customersAdded: customersAddedByStaff.get(staffId) || 0,
-        recentPayments: recentPaymentsRaw,
-      };
+    const staffId = String(staff._id);
+    return mapPerformanceCollector({
+      user: staff,
+      employeeCode: profileMap.get(staffId)?.employeeCode || "",
+      methodMap: methodTotalsByCollector.get(staffId),
+      recentEntries: recentByCollector.get(staffId) || [],
+      customersAdded: customersAddedByCollector.get(staffId) || 0,
+      cashInHand: custodyByStaff.get(staffId) ?? 0,
+      submittedCash: submittedByStaff.get(staffId) || 0,
+      submittedCashInRange: submittedInRangeByStaff.get(staffId) || 0,
     });
+  });
+
+  const adminList = adminUsers.map((admin) => {
+    const adminId = String(admin._id);
+    return mapPerformanceCollector({
+      user: admin,
+      employeeCode: "ADMIN",
+      methodMap: methodTotalsByCollector.get(adminId),
+      recentEntries: recentByCollector.get(adminId) || [],
+      customersAdded: customersAddedByCollector.get(adminId) || 0,
+    });
+  });
 
   return {
     from: range.from || null,
     to: range.to || null,
     staff: staffList,
+    admins: adminList,
   };
 };
 

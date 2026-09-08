@@ -866,6 +866,28 @@ describe("financial hardening", () => {
     assert.equal(ids.includes(String(withActive.customer._id)), false);
   });
 
+  it("21h. customer list schemeFilter=active returns only customers with an active scheme", async () => {
+    const admin = await createAdmin();
+    const withActive = await seedCustomerScheme(admin);
+    const noScheme = await createCustomer(
+      {
+        name: "No Scheme For Active Filter",
+        phone: `7${String(Date.now()).slice(-8)}${Math.floor(Math.random() * 9)}`,
+        password: "customer1pass",
+      },
+      admin
+    );
+    const page = await searchCustomers("", admin, {
+      paginated: true,
+      schemeFilter: "active",
+      limit: 50,
+    });
+    const ids = page.items.map((item) => String(item._id));
+    assert.equal(page.pageInfo.total, 1);
+    assert.ok(ids.includes(String(withActive.customer._id)));
+    assert.equal(ids.includes(String(noScheme._id)), false);
+  });
+
   it("21g. staff detail lists customers they added; createdBy list filter and admin password reset work", async () => {
     const admin = await createAdmin();
     const staff = await createStaff();

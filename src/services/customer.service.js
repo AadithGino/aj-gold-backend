@@ -569,6 +569,7 @@ const resetCustomerPassword = async (customerId, newPassword, actor) => {
 const resolveCustomerListFilter = (options = {}) => {
   const schemeFilter = String(options.schemeFilter || "").trim();
   if (schemeFilter === "none") return "none";
+  if (schemeFilter === "active") return "active";
   if (schemeFilter === "past" || options.sixMonthPhase === "past") return "past";
   return "";
 };
@@ -644,6 +645,11 @@ const searchCustomers = async (search = "", actor = null, options = {}) => {
       status: SCHEME_STATUS.ACTIVE,
     });
     constrainCustomerIds(query, activeCustomerIds, { exclude: true });
+  } else if (listFilter === "active") {
+    const activeCustomerIds = await Scheme.distinct("customer", {
+      status: SCHEME_STATUS.ACTIVE,
+    });
+    constrainCustomerIds(query, activeCustomerIds);
   }
 
   let customers = [];

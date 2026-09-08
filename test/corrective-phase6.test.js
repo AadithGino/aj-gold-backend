@@ -460,6 +460,7 @@ describe("Corrective Phase 6 — read-model consistency, pagination, safe search
     try {
       const report = await getStaffPerformanceReport({});
       assert.equal(report.staff.length, staffUsers.length);
+      assert.ok(Array.isArray(report.admins));
       assert.ok(
         queryCount < staffUsers.length * 4,
         `expected batched queries, saw ${queryCount}`
@@ -467,6 +468,31 @@ describe("Corrective Phase 6 — read-model consistency, pagination, safe search
     } finally {
       mongoose.Query.prototype.exec = originalExec;
     }
+  });
+
+  it("staff performance report includes admin collections without mixing them into staff", async () => {
+    const admin = await createAdmin();
+    const staff = await createStaff("Admin Perf Staff");
+    const { customer, scheme } = await seedCustomerScheme(admin, "AdminPerf");
+    await pay(customer, scheme, admin, 2500);
+    await pay(customer, scheme, staff, 1800);
+
+    const report = await getStaffPerformanceReport({});
+    const adminRow = (report.admins || []).find(
+      (row) => String(row.staffUserId) === String(admin._id)
+    );
+    const staffRow = report.staff.find(
+      (row) => String(row.staffUserId) === String(staff._id)
+    );
+    assert.ok(adminRow, "expected admin collector row");
+    assert.equal(adminRow.role, USER_ROLES.ADMIN);
+    assert.equal(adminRow.totalCollected, 2500);
+    assert.equal(adminRow.paymentCount, 1);
+    assert.equal(staffRow.totalCollected, 1800);
+    assert.equal(
+      report.staff.some((row) => String(row.staffUserId) === String(admin._id)),
+      false
+    );
   });
 
   it("malformed and cross-scope cursors are rejected", async () => {
