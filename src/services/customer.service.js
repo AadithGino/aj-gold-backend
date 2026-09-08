@@ -4,6 +4,8 @@ const User = require("../models/user.model");
 const Customer = require("../models/customer.model");
 const Scheme = require("../models/scheme.model");
 const Payment = require("../models/payment.model");
+const PaymentCorrection = require("../models/paymentCorrection.model");
+const FinancialJournal = require("../models/financialJournal.model");
 const {
   USER_ROLES,
   USER_STATUS,
@@ -23,6 +25,7 @@ const {
 } = require("./auth.service");
 
 const {
+  assertAdmin,
   assertCustomerSearchAccess,
   assertCustomerUpdateAccess,
   getCustomerAccessMode,
@@ -109,11 +112,13 @@ const generateCustomerCode = async (date = new Date(), session = null) => {
 
 const getCustomerOrThrow = async (customerId, session = null) => {
   const customer = await Customer.findById(customerId).session(session || null);
-  if (!customer) {
+  if (!customer || customer.deletedAt) {
     throw new ApiError(404, "Customer not found.");
   }
   return customer;
 };
+
+const vacatedDeletedPhone = (id) => `del:${String(id)}`;
 
 const assertCustomerActiveForOperations = async (customer, session = null) => {
   if (customer.status === USER_STATUS.INACTIVE) {
@@ -533,6 +538,80 @@ const updateCustomer = async (customerId, payload, actor) => {
   return sanitizeCustomer(customer);
 };
 
+const deleteCustomer = async (customerId, actor) => {
+  assertAdmin(actor, "Only admin can delete a customer.");
+
+  const snapshot = await withTransaction(async (session) => {
+    const customer = await getCustomerOrThrow(customerId, session);
+
+    if (customer.legalHold) {
+      throw new ApiError(409, "Cannot delete a customer on legal hold.");
+    }
+
+    const [schemeCount, paymentCount, correctionCount, journalCount] = await Promise.all([
+      Scheme.countDocuments({ customer: customer._id }).session(session),
+      Payment.countDocuments({ customer: customer._id }).session(session),
+      PaymentCorrection.countDocuments({ customer: customer._id }).session(session),
+      FinancialJournal.countDocuments({ customer: customer._id }).session(session),
+    ]);
+
+    if (schemeCount > 0) {
+      throw new ApiError(409, "Cannot delete a customer who has a scheme.");
+    }
+    if (paymentCount > 0 || correctionCount > 0 || journalCount > 0) {
+      throw new ApiError(409, "Cannot delete a customer with financial records.");
+    }
+
+    const originalPhone = customer.phone;
+    const vacatedPhone = vacatedDeletedPhone(customer.user || customer._id);
+
+    if (customer.user) {
+      const user = await User.findById(customer.user).session(session);
+      if (user) {
+        user.status = USER_STATUS.INACTIVE;
+        user.phone = vacatedPhone;
+        user.tokenVersion = (user.tokenVersion || 0) + 1;
+        user.updatedBy = actor._id;
+        await user.save({ session });
+      }
+    }
+
+    customer.originalPhone = originalPhone;
+    customer.phone = vacatedPhone;
+    customer.status = USER_STATUS.INACTIVE;
+    customer.deletedAt = new Date();
+    customer.deletedBy = actor._id;
+    customer.updatedBy = actor._id;
+    await customer.save({ session });
+
+    return {
+      _id: customer._id,
+      name: customer.name,
+      phone: originalPhone,
+      passbookNumber: customer.passbookNumber,
+    };
+  });
+
+  await logAudit({
+    actor: actor._id,
+    actorRole: actor.role,
+    action: AUDIT_ACTIONS.CUSTOMER_DELETED,
+    targetType: "Customer",
+    targetId: snapshot._id,
+    previousValue: {
+      name: snapshot.name,
+      phone: snapshot.phone,
+      passbookNumber: snapshot.passbookNumber,
+    },
+    notes: "Customer soft-deleted because they had no scheme; phone freed for reuse",
+  });
+
+  return {
+    deleted: true,
+    customerId: snapshot._id,
+  };
+};
+
 const resetCustomerPassword = async (customerId, newPassword, actor) => {
   const customer = await getCustomerOrThrow(customerId);
 
@@ -619,7 +698,7 @@ const searchCustomers = async (search = "", actor = null, options = {}) => {
   const listFilter = resolveCustomerListFilter(options);
   const createdBy = resolveCreatedByFilter(options.createdBy);
   const term = parseSafeSearchTerm(search, { label: "search" });
-  const query = {};
+  const query = { deletedAt: { $exists: false } };
   if (createdBy) {
     query.createdBy = createdBy;
   }
@@ -780,7 +859,7 @@ const getCustomerDetail = async (customerId, actor = null, options = {}) => {
   const customer = await Customer.findById(customerId)
     .populate("createdBy", "name role")
     .populate("updatedBy", "name role");
-  if (!customer) {
+  if (!customer || customer.deletedAt) {
     throw new ApiError(404, "Customer not found.");
   }
 
@@ -859,6 +938,10 @@ const getCustomerDetail = async (customerId, actor = null, options = {}) => {
     schemes: enrichedSchemes,
     paymentHistory,
     receiptHistory,
+    canDelete:
+      actor?.role === USER_ROLES.ADMIN &&
+      enrichedSchemes.length === 0 &&
+      !customer.legalHold,
   };
 };
 
@@ -886,6 +969,7 @@ module.exports = {
   createCustomer,
   registerCustomer,
   updateCustomer,
+  deleteCustomer,
   resetCustomerPassword,
   searchCustomers,
   getCustomerDetail,

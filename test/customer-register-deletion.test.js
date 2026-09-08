@@ -5,13 +5,18 @@ const mongoose = require("mongoose");
 const { MongoMemoryReplSet } = require("mongodb-memory-server");
 
 const User = require("../src/models/user.model");
-const { USER_ROLES, DELETION_REQUEST_STATUS } = require("../src/constants/enums");
+const Customer = require("../src/models/customer.model");
+const Scheme = require("../src/models/scheme.model");
+const CustomerDeletionRequest = require("../src/models/customerDeletionRequest.model");
+require("../src/models/auditLog.model");
+const { USER_ROLES, DELETION_REQUEST_STATUS, SCHEME_STATUS } = require("../src/constants/enums");
 const { register, login } = require("../src/services/auth.service");
 const {
   getDeletionRequestForUser,
   createDeletionRequest,
   cancelDeletionRequest,
 } = require("../src/services/customerDeletion.service");
+const { deleteCustomer, getCustomerDetail, searchCustomers } = require("../src/services/customer.service");
 const { runMigrations } = require("../src/migrations/runMigrations");
 
 let replSet;
@@ -22,6 +27,14 @@ const createStaff = async () =>
     phone: `8${String(Date.now()).slice(-9)}`,
     passwordHash: await bcrypt.hash("staffpass1", 10),
     role: USER_ROLES.STAFF,
+  });
+
+const createAdmin = async () =>
+  User.create({
+    name: "Reg Admin",
+    phone: `9${String(Date.now()).slice(-9)}`,
+    passwordHash: await bcrypt.hash("adminpass1", 10),
+    role: USER_ROLES.ADMIN,
   });
 
 describe("Customer self-register and deletion request", () => {
@@ -132,6 +145,122 @@ describe("Customer self-register and deletion request", () => {
     await assert.rejects(
       () => getDeletionRequestForUser(staff),
       (error) => error.statusCode === 403
+    );
+  });
+
+  it("lets admin delete a customer with no scheme and frees the phone", async () => {
+    const phone = `7${String(Date.now()).slice(-9)}`;
+    const admin = await createAdmin();
+    const registered = await register({
+      name: "No Scheme Customer",
+      phone,
+      password: "custpass1",
+    });
+    const passbookNumber = registered.customer.passbookNumber;
+
+    const detail = await getCustomerDetail(registered.customer._id, admin);
+    assert.equal(detail.canDelete, true);
+
+    await createDeletionRequest(registered.user, { reason: "Never started" });
+    const result = await deleteCustomer(registered.customer._id, admin);
+    assert.equal(result.deleted, true);
+
+    const keptCustomer = await Customer.findById(registered.customer._id);
+    const keptUser = await User.findById(registered.user._id);
+    assert.ok(keptCustomer);
+    assert.ok(keptUser);
+    assert.equal(keptCustomer.status, "INACTIVE");
+    assert.ok(keptCustomer.deletedAt);
+    assert.equal(keptCustomer.originalPhone, phone);
+    assert.notEqual(keptCustomer.phone, phone);
+    assert.equal(keptUser.status, "INACTIVE");
+    assert.notEqual(keptUser.phone, phone);
+    assert.equal(
+      await CustomerDeletionRequest.countDocuments({ customer: registered.customer._id }),
+      1
+    );
+
+    await assert.rejects(
+      () => getCustomerDetail(registered.customer._id, admin),
+      (error) => error.statusCode === 404
+    );
+
+    const listed = await searchCustomers(phone, admin, { paginated: true });
+    assert.equal(
+      listed.items.some((row) => String(row._id) === String(registered.customer._id)),
+      false
+    );
+
+    await assert.rejects(
+      () => login({ phone, password: "custpass1" }),
+      (error) => error.statusCode === 401
+    );
+
+    const reused = await register({
+      name: "Same Phone Again",
+      phone,
+      password: "custpass1",
+    });
+    assert.ok(reused.customer._id);
+    assert.notEqual(reused.customer.passbookNumber, passbookNumber);
+    assert.equal(
+      Number(reused.customer.passbookNumber),
+      Number(passbookNumber) + 1
+    );
+  });
+
+  it("blocks staff from deleting a scheme-less customer", async () => {
+    const staff = await createStaff();
+    const registered = await register({
+      name: "Staff Block",
+      phone: `7${String(Date.now()).slice(-9)}`,
+      password: "custpass1",
+    });
+
+    await assert.rejects(
+      () => deleteCustomer(registered.customer._id, staff),
+      (error) => error.statusCode === 403
+    );
+    assert.ok(await Customer.findById(registered.customer._id));
+  });
+
+  it("rejects delete when the customer has a scheme or legal hold", async () => {
+    const admin = await createAdmin();
+    const withScheme = await register({
+      name: "Has Scheme",
+      phone: `7${String(Date.now()).slice(-9)}`,
+      password: "custpass1",
+    });
+    await Scheme.create({
+      customer: withScheme.customer._id,
+      enrollmentNumber: `ENR-DEL-${Date.now()}`,
+      schemeName: "AJ Gold Scheme",
+      startDate: new Date("2026-01-01"),
+      sixMonthDate: new Date("2026-07-01"),
+      maturityDate: new Date("2026-12-01"),
+      status: SCHEME_STATUS.ACTIVE,
+      createdBy: admin._id,
+    });
+
+    const held = await register({
+      name: "Legal Hold",
+      phone: `7${String(Date.now() + 2).slice(-9)}`,
+      password: "custpass1",
+    });
+    await Customer.updateOne({ _id: held.customer._id }, { legalHold: true });
+
+    const schemeDetail = await getCustomerDetail(withScheme.customer._id, admin);
+    assert.equal(schemeDetail.canDelete, false);
+    const heldDetail = await getCustomerDetail(held.customer._id, admin);
+    assert.equal(heldDetail.canDelete, false);
+
+    await assert.rejects(
+      () => deleteCustomer(withScheme.customer._id, admin),
+      (error) => error.statusCode === 409 && /scheme/i.test(error.message)
+    );
+    await assert.rejects(
+      () => deleteCustomer(held.customer._id, admin),
+      (error) => error.statusCode === 409 && /legal hold/i.test(error.message)
     );
   });
 });

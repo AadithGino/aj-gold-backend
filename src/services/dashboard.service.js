@@ -155,7 +155,7 @@ const getAdminDashboard = async () => {
       },
       { $group: { _id: null, total: { $sum: "$submittedAmount" } } },
     ]),
-    Customer.countDocuments({}),
+    Customer.countDocuments({ deletedAt: { $exists: false } }),
   ]);
 
   const today = buildTodayMethodTotals(todayBreakdown);

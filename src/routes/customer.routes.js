@@ -12,6 +12,7 @@ const {
   listCustomersHandler,
   getCustomerHandler,
   updateCustomerHandler,
+  deleteCustomerHandler,
   resetCustomerPasswordHandler,
   getCustomerSchemesHandler,
   getCustomerRedemptionsHandler,
@@ -37,6 +38,7 @@ router.get(
 
 router.post("/", staffPermissionMiddleware("canCreateCustomer"), createCustomerHandler);
 router.patch("/:customerId", adminOnlyMiddleware, updateCustomerHandler);
+router.delete("/:customerId", adminOnlyMiddleware, deleteCustomerHandler);
 router.post("/:customerId/reset-password", adminOnlyMiddleware, resetCustomerPasswordHandler);
 
 module.exports = router;

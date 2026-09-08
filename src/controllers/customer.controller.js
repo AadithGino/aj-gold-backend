@@ -2,6 +2,7 @@ const { z } = require("zod");
 const {
   createCustomer,
   updateCustomer,
+  deleteCustomer,
   resetCustomerPassword,
   searchCustomers,
   getCustomerDetail,
@@ -106,6 +107,16 @@ const updateCustomerHandler = asyncHandler(async (req, res) => {
   });
 });
 
+const deleteCustomerHandler = asyncHandler(async (req, res) => {
+  const result = await deleteCustomer(req.params.customerId, req.user);
+
+  return res.status(200).json({
+    success: true,
+    message: "Customer deleted.",
+    data: result,
+  });
+});
+
 const resetCustomerPasswordHandler = asyncHandler(async (req, res) => {
   const payload = parseBody(resetPasswordSchema, req.body);
   await resetCustomerPassword(req.params.customerId, payload.newPassword, req.user);
@@ -145,6 +156,7 @@ module.exports = {
   listCustomersHandler,
   getCustomerHandler,
   updateCustomerHandler,
+  deleteCustomerHandler,
   resetCustomerPasswordHandler,
   getCustomerSchemesHandler,
   getCustomerRedemptionsHandler,

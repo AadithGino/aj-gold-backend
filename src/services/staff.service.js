@@ -423,8 +423,8 @@ const getStaffDetail = async (
     }),
     getStaffCashSubmissionHistory(staffUserId, { from: rangeFrom, to: rangeTo }),
     getStaffRedeemedClosedHistory(staffUserId),
-    Customer.countDocuments({ createdBy: staffUserId }),
-    Customer.find({ createdBy: staffUserId })
+    Customer.countDocuments({ createdBy: staffUserId, deletedAt: { $exists: false } }),
+    Customer.find({ createdBy: staffUserId, deletedAt: { $exists: false } })
       .sort({ createdAt: -1 })
       .select("name phone passbookNumber status createdAt")
       .lean(),
