@@ -329,8 +329,8 @@ const completeSettlement = async (schemeId, payload, actor) => {
       session,
       settlementType: payload.status,
     });
-    if (entitlement.finalEntitlement <= 0) {
-      throw new ApiError(400, "No eligible contributions to settle.", [], {
+    if (entitlement.finalEntitlement < 0) {
+      throw new ApiError(400, "Settlement entitlement cannot be negative.", [], {
         code: ERROR_CODES.SETTLEMENT_NOT_ELIGIBLE,
         retryable: false,
       });
@@ -339,20 +339,23 @@ const completeSettlement = async (schemeId, payload, actor) => {
     const now = new Date();
     const settlementReceiptId = await generateSettlementReceiptNumber(now, session);
     const totalPaidAtSettlement = await getTotalPaidForScheme(scheme._id, session);
-    const journalEntryIds = await writeSettlementJournalEntries({
-      scheme,
-      customerId: scheme.customer,
-      entitlement,
-      payout: {
-        settlementType: payload.status,
-        payoutMethod: payout.payoutMethod,
-        payoutReference: payout.payoutReference,
-        payoutEvidence,
-      },
-      actor,
-      clientRequestId,
-      session,
-    });
+    const journalEntryIds =
+      entitlement.eligibleContributions > 0
+        ? await writeSettlementJournalEntries({
+            scheme,
+            customerId: scheme.customer,
+            entitlement,
+            payout: {
+              settlementType: payload.status,
+              payoutMethod: payout.payoutMethod,
+              payoutReference: payout.payoutReference,
+              payoutEvidence,
+            },
+            actor,
+            clientRequestId,
+            session,
+          })
+        : [];
 
     appendStatusHistory(scheme, {
       status: payload.status,

@@ -247,6 +247,38 @@ describe("Phase 3 settlement and journal", () => {
     assert.equal(settled.status, SCHEME_STATUS.CLOSED);
   });
 
+  it("allows early CLOSED settlement with zero payments (no journal entries)", async () => {
+    const admin = await createAdmin();
+    const customer = await createCustomer(
+      {
+        name: "Zero Pay Early Close",
+        phone: `4${String(Date.now()).slice(-8)}${Math.floor(Math.random() * 9)}`,
+        password: "customer1pass",
+      },
+      admin
+    );
+    const recentStart = new Date();
+    const scheme = await createScheme(
+      {
+        customerId: customer._id.toString(),
+        startDate: recentStart,
+        clientRequestId: reqId(),
+      },
+      admin
+    );
+
+    const settled = await updateSchemeStatus(
+      scheme._id,
+      settlePayload({ status: SCHEME_STATUS.CLOSED }),
+      admin
+    );
+    assert.equal(settled.settlement.amount, 0);
+    assert.equal(settled.status, SCHEME_STATUS.CLOSED);
+
+    const journalCount = await FinancialJournal.countDocuments({ scheme: scheme._id });
+    assert.equal(journalCount, 0);
+  });
+
   it("direct settlement writes economic journal effects without authorization self-entry", async () => {
     const admin = await createAdmin();
     const { customer, scheme } = await seedCustomerScheme(admin);
