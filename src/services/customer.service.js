@@ -46,6 +46,7 @@ const sanitizeCollectionCustomer = (customer) => ({
   passbookNumber: customer.passbookNumber,
   name: customer.name,
   phone: customer.phone,
+  address: customer.address || "",
   status: customer.status,
 });
 

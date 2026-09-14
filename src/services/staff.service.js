@@ -426,7 +426,7 @@ const getStaffDetail = async (
     Customer.countDocuments({ createdBy: staffUserId, deletedAt: { $exists: false } }),
     Customer.find({ createdBy: staffUserId, deletedAt: { $exists: false } })
       .sort({ createdAt: -1 })
-      .select("name phone passbookNumber status createdAt")
+      .select("name phone address passbookNumber status createdAt")
       .lean(),
   ]);
 
@@ -449,6 +449,7 @@ const getStaffDetail = async (
       _id: customer._id,
       name: customer.name,
       phone: customer.phone,
+      address: customer.address || "",
       passbookNumber: customer.passbookNumber || "",
       status: customer.status,
       createdAt: customer.createdAt,
