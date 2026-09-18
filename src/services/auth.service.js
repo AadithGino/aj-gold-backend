@@ -13,12 +13,6 @@ const {
 } = require("../config/env");
 const { AUDIT_ACTIONS, USER_ROLES } = require("../constants/enums");
 const { assertPrivilegedPassword } = require("../constants/credentialPolicies");
-const {
-  assertNotLocked,
-  recordFailedAttempt,
-  resetAttempts,
-} = require("./loginRateLimit.service");
-
 const signAccessToken = (user) =>
   jwt.sign(
     {
@@ -48,32 +42,26 @@ const buildAuthResponse = (user) => ({
   },
 });
 
-const login = async ({ phone, password }, { ip } = {}) => {
+const login = async ({ phone, password }) => {
   if (!phone?.trim() || !password) {
     throw new ApiError(400, "Phone and password are required.");
   }
 
   const normalizedPhone = phone.trim();
-  await assertNotLocked({ ip, phone: normalizedPhone });
 
   const user = await User.findOne({ phone: normalizedPhone }).select("name phone role status tokenVersion +passwordHash");
   if (!user) {
-    await recordFailedAttempt({ ip, phone: normalizedPhone });
     throw new ApiError(401, "Invalid phone or password.");
   }
   if (user.status === "INACTIVE") throw new ApiError(403, "Account is inactive.");
   if (!user.passwordHash) {
-    await recordFailedAttempt({ ip, phone: normalizedPhone });
     throw new ApiError(401, "Invalid phone or password.");
   }
 
   const match = await bcrypt.compare(password, user.passwordHash);
   if (!match) {
-    await recordFailedAttempt({ ip, phone: normalizedPhone });
     throw new ApiError(401, "Invalid phone or password.");
   }
-
-  await resetAttempts({ ip, phone: normalizedPhone });
 
   await User.updateOne({ _id: user._id }, { $set: { lastLoginAt: new Date() } });
 
@@ -152,13 +140,8 @@ const changePassword = async ({ currentPassword, newPassword }, actor) => {
   return buildAuthResponse(user);
 };
 
-const register = async (payload, { ip } = {}) => {
+const register = async (payload) => {
   const { registerCustomer } = require("./customer.service");
-  const phone = payload?.phone?.trim();
-  if (phone) {
-    await assertNotLocked({ ip, phone });
-  }
-
   const { user, customer } = await registerCustomer(payload);
 
   await logAudit({

@@ -8,8 +8,6 @@ const mongoose = require("mongoose");
 const { MONGO_URI } = require("../src/config/env");
 const User = require("../src/models/user.model");
 const Customer = require("../src/models/customer.model");
-const LoginAttempt = require("../src/models/loginAttempt.model");
-
 const phone = String(process.argv[2] || "").replace(/\D/g, "");
 if (phone.length < 10) {
   console.error("Usage: node scripts/lookup-login-user.js <10-digit-phone>");
@@ -41,10 +39,6 @@ const main = async () => {
         matches.push(candidate);
       }
     }
-    const locks = await LoginAttempt.find({
-      key: { $in: [`account:${user.phone}`, `account:${digits}`] },
-    }).select("key failedCount lockedUntil");
-
     console.log("---");
     console.log(`name: ${user.name}`);
     console.log(`role: ${user.role}`);
@@ -57,17 +51,6 @@ const main = async () => {
         ? `password matches: ${matches.join(", ")}`
         : "password does not match passbook, 0001, or the phone number (a custom password was set)"
     );
-    if (locks.length) {
-      for (const lock of locks) {
-        console.log(
-          `login attempts: ${lock.key} failed=${lock.failedCount || 0} lockedUntil=${
-            lock.lockedUntil || "none"
-          }`
-        );
-      }
-    } else {
-      console.log("login lock: none");
-    }
   }
 
   await mongoose.disconnect();

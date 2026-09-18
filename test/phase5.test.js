@@ -9,7 +9,6 @@ const { MongoMemoryReplSet } = require("mongodb-memory-server");
 const User = require("../src/models/user.model");
 const Customer = require("../src/models/customer.model");
 const StaffProfile = require("../src/models/staffProfile.model");
-const LoginAttempt = require("../src/models/loginAttempt.model");
 const AuditLog = require("../src/models/auditLog.model");
 const {
   USER_ROLES,
@@ -32,11 +31,6 @@ const {
 const { createStaff } = require("../src/services/staff.service");
 const { collectPayment } = require("../src/services/payment.service");
 const { createScheme, updateSchemeStatus } = require("../src/services/schemeManagement.service");
-const {
-  recordFailedAttempt,
-  resetAttempts,
-  buildKey,
-} = require("../src/services/loginRateLimit.service");
 const { runMigrations } = require("../src/migrations/runMigrations");
 const { JWT_SECRET, JWT_ISSUER, JWT_AUDIENCE } = require("../src/config/env");
 const ApiError = require("../src/utils/ApiError");
@@ -154,34 +148,6 @@ describe("Phase 5 auth and permission guardrails", () => {
     await logout(admin);
     const audit = await AuditLog.findOne({ actor: admin._id, action: AUDIT_ACTIONS.LOGOUT });
     assert.ok(audit);
-  });
-
-  it("persistent login limiter tracks IP and account independently", async () => {
-    const phone = `6${String(Date.now()).slice(-9)}`;
-    const ip = "203.0.113.10";
-
-    for (let attempt = 0; attempt < 20; attempt += 1) {
-      await recordFailedAttempt({ ip, phone: null });
-    }
-
-    await assert.rejects(
-      () => recordFailedAttempt({ ip, phone: null }),
-      (error) => error.statusCode === 429
-    );
-
-    await resetAttempts({ ip, phone: null });
-    await assert.doesNotReject(() => recordFailedAttempt({ ip, phone: null }));
-
-    await LoginAttempt.deleteMany({});
-    for (let attempt = 0; attempt < 20; attempt += 1) {
-      await recordFailedAttempt({ phone });
-    }
-    await assert.rejects(
-      () => recordFailedAttempt({ phone }),
-      (error) => error.statusCode === 429
-    );
-    const accountEntry = await LoginAttempt.findOne({ key: buildKey("account", phone) });
-    assert.ok(accountEntry.lockedUntil);
   });
 
   it("missing StaffProfile and missing permission deny staff access", async () => {

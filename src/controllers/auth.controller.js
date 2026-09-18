@@ -2,12 +2,12 @@ const { login, register, me, logout, changePassword } = require("../services/aut
 const asyncHandler = require("../utils/asyncHandler");
 
 const loginController = asyncHandler(async (req, res) => {
-  const result = await login(req.body, { ip: req.clientIp || req.ip });
+  const result = await login(req.body);
   res.json({ success: true, data: result });
 });
 
 const registerController = asyncHandler(async (req, res) => {
-  const result = await register(req.body, { ip: req.clientIp || req.ip });
+  const result = await register(req.body);
   res.status(201).json({ success: true, data: result });
 });
 
