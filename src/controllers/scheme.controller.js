@@ -17,7 +17,19 @@ const { clientRequestIdSchema } = require("../validation/financial.validation");
 const createSchemeSchema = z.object({
   customerId: z.string().min(1, "Customer is required."),
   schemeName: z.string().trim().optional(),
-  startDate: z.coerce.date().optional(),
+  // Keep YYYY-MM-DD as a string so toBusinessInstant can apply Asia/Kolkata
+  // start-of-day. z.coerce.date() was turning "2026-09-27" into UTC midnight
+  // (05:30 IST) and blocking early-morning first payments.
+  startDate: z.preprocess(
+    (value) => (value === "" || value === null ? undefined : value),
+    z
+      .union([
+        z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "startDate must be YYYY-MM-DD"),
+        z.date(),
+        z.string().min(1),
+      ])
+      .optional()
+  ),
   clientRequestId: clientRequestIdSchema,
 });
 

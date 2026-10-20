@@ -82,4 +82,36 @@ describe("scheme window policy", () => {
       PAYMENT_PERIODS.FIRST
     );
   });
+
+  it("normalizes legacy UTC-midnight stored starts to IST midnight", () => {
+    // Simulates schemes saved when z.coerce.date() turned "2026-09-27" into UTC midnight.
+    const legacyScheme = {
+      startDate: new Date("2026-09-27T00:00:00.000Z"),
+      sixMonthDate: new Date("2027-03-27T00:00:00.000Z"),
+      maturityDate: new Date("2027-08-27T00:00:00.000Z"),
+    };
+    const { startDate, laterPeriodStart, maturityDate } = deriveSchemeWindow(legacyScheme);
+
+    assert.equal(startDate.toISOString(), "2026-09-26T18:30:00.000Z");
+    assert.equal(laterPeriodStart.toISOString(), "2027-03-26T18:30:00.000Z");
+    assert.equal(maturityDate.toISOString(), "2027-08-26T18:30:00.000Z");
+    assert.equal(
+      classifyEffectivePayment(legacyScheme, new Date("2026-09-26T20:23:00.000Z")),
+      PAYMENT_PERIODS.FIRST
+    );
+  });
+
+  it("keeps already-correct IST midnight starts unchanged", () => {
+    const scheme = schemeFromStart("2026-09-27");
+    const { startDate } = deriveSchemeWindow(scheme);
+    assert.equal(startDate.toISOString(), "2026-09-26T18:30:00.000Z");
+    assert.equal(
+      deriveSchemeWindow({
+        startDate,
+        sixMonthDate: scheme.sixMonthDate,
+        maturityDate: scheme.maturityDate,
+      }).startDate.toISOString(),
+      "2026-09-26T18:30:00.000Z"
+    );
+  });
 });

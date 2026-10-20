@@ -48,10 +48,23 @@ const reversePaymentSchema = z.object({
   clientRequestId: clientRequestIdSchema,
 });
 
+const businessDateInputSchema = z.preprocess(
+  (value) => (value === "" || value === null ? undefined : value),
+  z
+    .union([
+      z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Date must be YYYY-MM-DD"),
+      z.date(),
+      z.string().min(1),
+    ])
+    .optional()
+);
+
 const cashSubmissionSchema = z.object({
   staff: z.string().min(1, "Staff is required."),
   submittedAmount: positiveRupeeSchema("submittedAmount"),
-  submissionDate: z.coerce.date().optional(),
+  // Keep YYYY-MM-DD as a string so toBusinessInstant can apply IST start-of-day.
+  // z.coerce.date() was storing UTC midnight and showing as 5:30 AM IST.
+  submissionDate: businessDateInputSchema,
   notes: z.string().trim().optional(),
   clientRequestId: clientRequestIdSchema,
 });

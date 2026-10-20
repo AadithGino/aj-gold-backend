@@ -15,7 +15,7 @@ const { ERROR_CODES } = require("../constants/errorCodes");
 const { parsePositiveRupeeInteger } = require("../utils/money");
 const { withTransaction } = require("../utils/transaction");
 const { logAudit } = require("./audit.service");
-const { parseDateRange } = require("../utils/date");
+const { parseDateRange, toBusinessInstant } = require("../utils/date");
 const {
   checkIdempotencyReplay,
   saveIdempotencyResult,
@@ -237,7 +237,14 @@ const getStaffCashSubmissionHistory = async (staffId, { from, to } = {}) => {
 
 const createCashSubmission = async (payload, actor) => {
   const submittedAmount = parsePositiveRupeeInteger(payload.submittedAmount, "submittedAmount");
-  const submissionDate = payload.submissionDate ? new Date(payload.submissionDate) : new Date();
+  let submissionDate;
+  try {
+    submissionDate = payload.submissionDate
+      ? toBusinessInstant(payload.submissionDate)
+      : new Date();
+  } catch {
+    throw new ApiError(400, "Invalid submission date.");
+  }
   if (Number.isNaN(submissionDate.getTime())) {
     throw new ApiError(400, "Invalid submission date.");
   }

@@ -13,6 +13,8 @@ const BUSINESS_TIMEZONE = "Asia/Kolkata";
 
 const toDate = (value) => (value instanceof Date ? value : new Date(value));
 
+const pad2 = (n) => String(n).padStart(2, "0");
+
 const isDateOnlyInput = (value) => {
   if (value instanceof Date) {
     return false;
@@ -24,19 +26,46 @@ const isDateOnlyInput = (value) => {
   return /^\d{4}-\d{2}-\d{2}$/.test(trimmed);
 };
 
+/** True for Date-only coercions like `new Date("2026-09-27")` → UTC midnight. */
+const isUtcMidnightInstant = (date) =>
+  date instanceof Date &&
+  !Number.isNaN(date.getTime()) &&
+  date.getUTCHours() === 0 &&
+  date.getUTCMinutes() === 0 &&
+  date.getUTCSeconds() === 0 &&
+  date.getUTCMilliseconds() === 0;
+
+const utcCalendarDayKey = (date) =>
+  `${date.getUTCFullYear()}-${pad2(date.getUTCMonth() + 1)}-${pad2(date.getUTCDate())}`;
+
+const startOfBusinessDayFromYmd = (ymd) =>
+  dayjs.tz(String(ymd).trim(), BUSINESS_TIMEZONE).startOf("day").toDate();
+
+/**
+ * Normalize scheme calendar dates to Asia/Kolkata start-of-day.
+ * Date-only strings and legacy UTC-midnight instants (from z.coerce.date /
+ * `new Date("YYYY-MM-DD")`) become IST midnight; real timestamps stay as-is.
+ */
 const toBusinessInstant = (value) => {
   if (value === null || value === undefined || value === "") {
     return new Date();
   }
 
   if (isDateOnlyInput(value)) {
-    return dayjs.tz(value.trim(), BUSINESS_TIMEZONE).startOf("day").toDate();
+    return startOfBusinessDayFromYmd(value);
   }
 
   const parsed = toDate(value);
   if (Number.isNaN(parsed.getTime())) {
     throw new Error("Invalid date value.");
   }
+
+  // Legacy bug: Zod coerce / Date.parse of YYYY-MM-DD stored UTC midnight
+  // (05:30 IST). Re-read as that calendar day in Asia/Kolkata.
+  if (isUtcMidnightInstant(parsed)) {
+    return startOfBusinessDayFromYmd(utcCalendarDayKey(parsed));
+  }
+
   return parsed;
 };
 
@@ -107,6 +136,7 @@ const buildPaymentDateMatch = (from, to) => {
 module.exports = {
   BUSINESS_TIMEZONE,
   toDate,
+  isUtcMidnightInstant,
   toBusinessInstant,
   inBusinessTz,
   addCalendarMonthsInBusinessTz,

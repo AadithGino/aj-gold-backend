@@ -1,5 +1,6 @@
 const ApiError = require("./ApiError");
 const { ERROR_CODES } = require("../constants/errorCodes");
+const { toBusinessInstant } = require("./date");
 
 const PAYMENT_PERIODS = {
   BEFORE_START: "before_start",
@@ -16,10 +17,18 @@ const toInstant = (value) => {
   return instant;
 };
 
+const toSchemeBoundaryInstant = (value) => {
+  try {
+    return toBusinessInstant(value);
+  } catch {
+    throw new ApiError(400, "Invalid scheme date.");
+  }
+};
+
 const deriveSchemeWindow = (scheme) => ({
-  startDate: toInstant(scheme.startDate),
-  laterPeriodStart: toInstant(scheme.sixMonthDate),
-  maturityDate: toInstant(scheme.maturityDate),
+  startDate: toSchemeBoundaryInstant(scheme.startDate),
+  laterPeriodStart: toSchemeBoundaryInstant(scheme.sixMonthDate),
+  maturityDate: toSchemeBoundaryInstant(scheme.maturityDate),
 });
 
 const classifyEffectivePayment = (scheme, effectivePaymentAt) => {
